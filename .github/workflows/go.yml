@@ -1,0 +1,48 @@
+name: Verify and build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: '1.27.2'
+          cache: true
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install packet capture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpcap-dev gcc
+      - name: Download modules
+        run: go mod download
+      - name: Verify Go code
+        run: |
+          go test -race ./... -count=1 -timeout=120s
+          go vet ./...
+      - name: Verify certificate exporter
+        run: python3 -m unittest discover -s tools -p 'test_*.py' -v
+      - name: Build Linux executables
+        run: |
+          mkdir -p bin
+          CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o bin/certscout-linux-amd64 ./cmd/certscout
+          go build -trimpath -ldflags='-s -w' -o bin/ip4scout-linux-amd64 ./cmd/ip4scout
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: skout-linux-amd64
+          path: bin/
+          retention-days: 7

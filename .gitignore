@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+/certscout
+/ip4scout
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+/services.jsonl
+/domains.txt
+/evidence.jsonl
+/bin/
