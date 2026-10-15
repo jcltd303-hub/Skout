@@ -2,15 +2,18 @@ package certificates
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"strings"
@@ -78,7 +81,7 @@ func fixtureTLS(t *testing.T, mode string, config *tls.Config) Target {
 			return err == nil && strings.TrimSpace(line) == want
 		}
 		switch mode {
-		case "smtp":
+		case "smtp", "lmtp":
 			_, _ = fmt.Fprint(c, "220-fixture ready\r\n220 ESMTP\r\n")
 			if !read("EHLO scout.invalid") {
 				return
@@ -286,6 +289,316 @@ func TestProtocolReplyCannotGrowWithoutBound(t *testing.T) {
 	events, err := Collect(context.Background(), target, fastOptions())
 	if err != nil || len(events) != 1 || !strings.Contains(events[0].Error, "128 lines") || events[0].SSL.Enabled {
 		t.Fatalf("unbounded response accepted: %v %+v", err, events)
+	}
+}
+
+func testCertificateChain(t *testing.T) tls.Certificate {
+	t.Helper()
+	now := time.Now()
+	caPub, caKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTemplate := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "Test CA"}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(48 * time.Hour), IsCA: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature, BasicConstraintsValid: true}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, caPub, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafPub, leafKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTemplate := &x509.Certificate{SerialNumber: big.NewInt(3), Subject: pkix.Name{CommonName: "leaf.example.test"}, DNSNames: []string{"leaf.example.test"}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(50 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caCert, leafPub, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafPriv, err := x509.MarshalPKCS8PrivateKey(leafKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := tls.X509KeyPair(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: leafPriv}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert.Certificate = append(cert.Certificate, caDER)
+	return cert
+}
+
+func TestCollectChainExpiryAndVerify(t *testing.T) {
+	target := fixtureTLS(t, "tls", &tls.Config{Certificates: []tls.Certificate{testCertificateChain(t)}})
+	target.Host = "leaf.example.test"
+	events, err := Collect(context.Background(), target, fastOptions())
+	if err != nil || len(events) != 1 || events[0].Error != "" {
+		t.Fatalf("%v %+v", err, events)
+	}
+	cert := events[0].SSL.Certificate
+	if cert.ChainLength != 1 || len(cert.Chain) != 1 || cert.Chain[0].CommonName != "Test CA" || len(cert.Chain[0].Fingerprint) != 64 {
+		t.Fatalf("bad chain evidence: %+v", cert)
+	}
+	if cert.ExpiresInDays != 2 {
+		t.Fatalf("ExpiresInDays = %d, want 2 (50h leaf)", cert.ExpiresInDays)
+	}
+	if cert.ChainValidation != "not_assessed" {
+		t.Fatalf("ChainValidation = %q, want not_assessed without --verify-chain", cert.ChainValidation)
+	}
+	o := fastOptions()
+	o.VerifyChain = true
+	events, err = Collect(context.Background(), target, o)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("%v %+v", err, events)
+	}
+	if got := events[0].SSL.Certificate.ChainValidation; !strings.HasPrefix(got, "invalid:") {
+		t.Fatalf("self-signed chain reported %q, want invalid:...", got)
+	}
+}
+
+func TestCollectExpiryFilterDropsLateCerts(t *testing.T) {
+	target := fixtureTLS(t, "tls", &tls.Config{Certificates: []tls.Certificate{testCertificateChain(t)}})
+	o := fastOptions()
+	o.ExpiryWithinDays = 1
+	events, err := Collect(context.Background(), target, o)
+	if err != nil || len(events) != 0 {
+		t.Fatalf("cert expiring in 2 days kept with 1-day window: %+v (%v)", events, err)
+	}
+	o.ExpiryWithinDays = 3
+	events, err = Collect(context.Background(), target, o)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("cert expiring in 2 days dropped with 3-day window: %+v (%v)", events, err)
+	}
+	// Error events pass through the expiry filter.
+	o.ExpiryWithinDays = 1
+	events, err = Collect(context.Background(), Target{IP: "127.0.0.1", Port: 1}, o)
+	if err != nil || len(events) != 1 || events[0].Error == "" {
+		t.Fatalf("error event lost to expiry filter: %+v (%v)", events, err)
+	}
+}
+
+func TestCollectIPv6Loopback(t *testing.T) {
+	listener, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skip("IPv6 loopback unavailable")
+	}
+	cert := testCertificate(t, "v6.example.test", "v6.example.test")
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer c.Close()
+				_ = c.SetDeadline(time.Now().Add(2 * time.Second))
+				_ = tls.Server(c, &tls.Config{Certificates: []tls.Certificate{cert}}).Handshake()
+			}()
+		}
+	}()
+	t.Cleanup(func() { _ = listener.Close(); <-done; wg.Wait() })
+	target := Target{IP: "::1", Port: listener.Addr().(*net.TCPAddr).Port}
+	events, err := Collect(context.Background(), target, fastOptions())
+	if err != nil || len(events) != 1 || events[0].Error != "" || !events[0].SSL.Enabled {
+		t.Fatalf("IPv6 collection failed: %+v (%v)", events, err)
+	}
+}
+
+func TestProtocolForNewModes(t *testing.T) {
+	for port, mode := range map[int]string{389: "ldap", 5222: "xmpp", 5432: "postgres", 24: "lmtp"} {
+		if got := protocolFor(Target{Port: port}, fastOptions()); got != mode {
+			t.Fatalf("port %d: got %s, want %s", port, got, mode)
+		}
+	}
+	o := fastOptions()
+	o.Protocol = "tcp"
+	if got := protocolFor(Target{Port: 5432}, o); got != "tcp" {
+		t.Fatal("explicit override lost to port table")
+	}
+	if got := protocolFor(Target{Port: 5432, Mode: "tls"}, fastOptions()); got != "tls" {
+		t.Fatal("endpoint mode lost to port table")
+	}
+}
+
+func fixtureLDAP(t *testing.T) Target {
+	t.Helper()
+	target := fixtureServer(t, func(c net.Conn) {
+		buf := make([]byte, 31)
+		if _, err := io.ReadFull(c, buf); err != nil {
+			return
+		}
+		_, _ = c.Write([]byte{0x30, 0x0c, 0x02, 0x01, 0x01, 0x61, 0x07, 0x0a, 0x01, 0x00, 0x04, 0x00, 0x04, 0x00})
+		_ = tls.Server(c, &tls.Config{Certificates: []tls.Certificate{testCertificate(t, "ldap.example.test", "ldap.example.test")}}).Handshake()
+	})
+	target.Mode = "ldap"
+	return target
+}
+
+func fixturePostgres(t *testing.T) Target {
+	t.Helper()
+	target := fixtureServer(t, func(c net.Conn) {
+		buf := make([]byte, 8)
+		if _, err := io.ReadFull(c, buf); err != nil {
+			return
+		}
+		if buf[4] != 4 || buf[5] != 0xd2 || buf[6] != 0x16 || buf[7] != 0x2f {
+			return
+		}
+		_, _ = c.Write([]byte{'S'})
+		_ = tls.Server(c, &tls.Config{Certificates: []tls.Certificate{testCertificate(t, "pg.example.test", "pg.example.test")}}).Handshake()
+	})
+	target.Mode = "postgres"
+	return target
+}
+
+func fixtureXMPP(t *testing.T) Target {
+	t.Helper()
+	target := fixtureServer(t, func(c net.Conn) {
+		var buf []byte
+		tmp := make([]byte, 512)
+		for !strings.Contains(string(buf), "starttls") {
+			n, err := c.Read(tmp)
+			if err != nil {
+				return
+			}
+			buf = append(buf, tmp[:n]...)
+			if len(buf) > 4096 {
+				return
+			}
+		}
+		_, _ = io.WriteString(c, "<stream:features><starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/><proceed xmlns='urn:ietf:params:xml:ns:xmpp-tls'/></stream:features>")
+		_ = tls.Server(c, &tls.Config{Certificates: []tls.Certificate{testCertificate(t, "xmpp.example.test", "xmpp.example.test")}}).Handshake()
+	})
+	target.Mode = "xmpp"
+	return target
+}
+
+func TestCollectNewSTARTTLSProtocols(t *testing.T) {
+	targets := map[string]Target{
+		"ldap":     fixtureLDAP(t),
+		"postgres": fixturePostgres(t),
+		"xmpp":     fixtureXMPP(t),
+		"lmtp":     fixtureTLS(t, "lmtp", &tls.Config{Certificates: []tls.Certificate{testCertificate(t, "lmtp.example.test", "lmtp.example.test")}}),
+	}
+	for name, target := range targets {
+		t.Run(name, func(t *testing.T) {
+			events, err := Collect(context.Background(), target, fastOptions())
+			if err != nil || len(events) != 1 || events[0].Error != "" || !events[0].SSL.Enabled {
+				t.Fatalf("bad %s collection: %+v (%v)", name, events, err)
+			}
+		})
+	}
+}
+
+func TestMinTLSVersionEnforcedInHandshake(t *testing.T) {
+	target := fixtureTLS(t, "tls", &tls.Config{Certificates: []tls.Certificate{testCertificate(t, "min.example.test", "min.example.test")}, MaxVersion: tls.VersionTLS12})
+	o := fastOptions()
+	o.MinTLSVersion = "1.3"
+	events, err := Collect(context.Background(), target, o)
+	if err != nil || len(events) != 1 || events[0].Error == "" || events[0].SSL.Enabled {
+		t.Fatalf("TLS 1.2-only server accepted with min 1.3: %+v (%v)", events, err)
+	}
+}
+
+func TestJARMProbeBuilderDeterministic(t *testing.T) {
+	probes := jarmProbes()
+	if len(probes) != 10 {
+		t.Fatalf("got %d probes, want 10", len(probes))
+	}
+	a := buildClientHello(probes[0], "example.test")
+	b := buildClientHello(probes[0], "example.test")
+	if !bytes.Equal(a, b) {
+		t.Fatal("same probe produced different ClientHello bytes")
+	}
+	if len(a) < 48 || a[0] != 0x16 || a[5] != 0x01 {
+		t.Fatal("not a TLS handshake record")
+	}
+	if got := binary.BigEndian.Uint16(a[9:11]); got != probes[0].version {
+		t.Fatalf("ClientHello version %#x, want %#x", got, probes[0].version)
+	}
+	if got := binary.BigEndian.Uint16(a[46:48]); got != probes[0].ciphers[0] {
+		t.Fatalf("first cipher %#x, want %#x", got, probes[0].ciphers[0])
+	}
+	if !bytes.Contains(a, []byte("example.test")) {
+		t.Fatal("SNI missing from ClientHello")
+	}
+	if probes[2].version != 0x0301 {
+		t.Fatalf("probe 3 version %#x, want TLS 1.0 (0x0301)", probes[2].version)
+	}
+}
+
+func TestJARMLoopbackBestEffort(t *testing.T) {
+	target := fixtureTLS(t, "tls", &tls.Config{Certificates: []tls.Certificate{testCertificate(t, "jarm.example.test", "jarm.example.test")}})
+	fp, err := JARMFingerprint(context.Background(), target, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fp == "" {
+		return // server declined a probe: best-effort empty is valid
+	}
+	if len(fp) != 62 {
+		t.Fatalf("JARM length %d, want 62", len(fp))
+	}
+	for _, ch := range fp {
+		if !strings.ContainsRune("0123456789abcdef", ch) {
+			t.Fatalf("JARM not lowercase hex: %q", fp)
+		}
+	}
+}
+
+func TestHTTPBannerLoopback(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:8443")
+	if err != nil {
+		t.Skip("port 8443 unavailable")
+	}
+	cert := testCertificate(t, "banner.example.test", "banner.example.test")
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer c.Close()
+				_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+				tc := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{cert}})
+				if err := tc.Handshake(); err != nil {
+					return
+				}
+				reader := bufio.NewReader(tc)
+				for {
+					line, err := reader.ReadString('\n')
+					if err != nil || line == "\r\n" || line == "\n" {
+						break
+					}
+				}
+				body := "<html><head><title>Hello Banner</title></head><body>x</body></html>"
+				_, _ = fmt.Fprintf(tc, "HTTP/1.1 200 OK\r\nServer: fixture/1.0\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+			}()
+		}
+	}()
+	t.Cleanup(func() { _ = listener.Close(); <-done; wg.Wait() })
+	target := Target{IP: "127.0.0.1", Port: 8443}
+	o := fastOptions()
+	o.HTTPBanner = true
+	events, err := Collect(context.Background(), target, o)
+	if err != nil || len(events) != 1 || events[0].Error != "" {
+		t.Fatalf("banner collection failed: %+v (%v)", events, err)
+	}
+	banner := events[0].HTTPBanner
+	if banner == nil || banner.Server != "fixture/1.0" || banner.Title != "Hello Banner" || banner.Status != 200 {
+		t.Fatalf("bad banner: %+v", banner)
 	}
 }
 

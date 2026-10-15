@@ -62,7 +62,12 @@ func Main(args []string) int {
 	fs.IntVar(&cmd.SNILimit, "sni-limit", cmd.SNILimit, "Maximum same-IP/port concrete SAN follow-ups")
 	fs.IntVar(&cmd.DedupCapacity, "dedup-capacity", cmd.DedupCapacity, "Maximum cached endpoint/SNI keys")
 	fs.DurationVar(&cmd.DedupTTL, "dedup-ttl", cmd.DedupTTL, "Endpoint duplicate suppression window")
-	fs.StringVar(&cmd.Protocol, "protocol", "auto", "auto, tcp (connect only), tls, smtp, ftp, imap or pop3")
+	fs.StringVar(&cmd.Protocol, "protocol", "auto", "auto, tcp (connect only), tls, smtp, ftp, imap, pop3, ldap, xmpp, postgres or lmtp")
+	fs.StringVar(&cmd.MinTLSVersion, "min-tls-version", cmd.MinTLSVersion, "Minimum TLS version: 1.0, 1.1, 1.2 or 1.3")
+	fs.BoolVar(&cmd.VerifyChain, "verify-chain", cmd.VerifyChain, "Verify the certificate chain against system roots")
+	fs.BoolVar(&cmd.HTTPBanner, "http-banner", cmd.HTTPBanner, "Fetch an HTTP banner (Server + title) on ports 443/8443")
+	fs.IntVar(&cmd.ExpiryWithinDays, "expiry-within-days", cmd.ExpiryWithinDays, "Only keep certificates expiring within N days; 0 disables the filter")
+	fs.BoolVar(&cmd.JARM, "jarm", cmd.JARM, "Compute the 10-probe JARM fingerprint for direct TLS endpoints")
 	if len(args) > 0 && args[0] == "service" {
 		args = args[1:]
 	}

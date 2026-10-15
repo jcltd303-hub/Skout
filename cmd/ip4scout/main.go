@@ -1,9 +1,13 @@
 package main
 
 import (
-	"github.com/LeakIX/ip4scout"
-	"github.com/LeakIX/ip4scout/certificates"
+	"fmt"
+	"os"
+
 	"github.com/alecthomas/kong"
+	"github.com/jcltd303-hub/Skout"
+	"github.com/jcltd303-hub/Skout/certificates"
+	"github.com/jcltd303-hub/Skout/version"
 )
 
 var App struct {
@@ -12,6 +16,12 @@ var App struct {
 }
 
 func main() {
+	for _, arg := range os.Args[1:] {
+		if arg == "--version" || arg == "-version" {
+			fmt.Printf("ip4scout %s\n", version.Version)
+			return
+		}
+	}
 	ctx := kong.Parse(&App)
 	// Call the Run() method of the selected parsed command.
 	err := ctx.Run()

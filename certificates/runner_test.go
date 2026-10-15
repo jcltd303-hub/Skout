@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -94,6 +95,34 @@ func TestOutputFailureCancelsAndJoinsWorkers(t *testing.T) {
 	_, err := Run(context.Background(), strings.NewReader(input.String()), failedOutput{}, fastOptions())
 	if err == nil || !strings.Contains(err.Error(), "fixture output unavailable") || time.Since(start) > time.Second {
 		t.Fatalf("output failure did not stop collection: %v", err)
+	}
+}
+
+func TestStartLimiterConcurrentWaitsDoNotSerialize(t *testing.T) {
+	limiter := newStartLimiter(50) // 20ms interval
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	var wg sync.WaitGroup
+	errs := make(chan error, 5)
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- limiter.Wait(ctx)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Wait failed: %v", err)
+		}
+	}
+	// Five reservations at 20ms pacing span ~80ms; the loose bound proves
+	// the cap still paces instead of letting all five through at once.
+	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
+		t.Fatalf("concurrent waits finished in %v, rate cap not enforced", elapsed)
 	}
 }
 

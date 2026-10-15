@@ -22,13 +22,26 @@ type startLimiter struct {
 func newStartLimiter(rate int) *startLimiter {
 	return &startLimiter{interval: time.Second / time.Duration(rate)}
 }
+
+// Wait reserves the next start slot under the mutex, then sleeps outside
+// the lock so concurrent Wait calls pace against the reservation instead of
+// serializing on the mutex.
 func (l *startLimiter) Wait(ctx context.Context) error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if err := ctx.Err(); err != nil {
+		l.mu.Unlock()
 		return err
 	}
-	if delay := time.Until(l.next); delay > 0 {
+	now := time.Now()
+	var delay time.Duration
+	if l.next.After(now) {
+		delay = l.next.Sub(now)
+		l.next = l.next.Add(l.interval)
+	} else {
+		l.next = now.Add(l.interval)
+	}
+	l.mu.Unlock()
+	if delay > 0 {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
@@ -37,7 +50,6 @@ func (l *startLimiter) Wait(ctx context.Context) error {
 		case <-timer.C:
 		}
 	}
-	l.next = time.Now().Add(l.interval)
 	return nil
 }
 
