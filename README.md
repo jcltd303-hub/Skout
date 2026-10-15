@@ -139,6 +139,11 @@ by Skout. Certificate output alone cannot supply that evidence. EPSS estimates
 exploitation in the next 30 days across the population, not the chance of
 compromise of a particular asset. Absence from KEV or a missing score does not
 establish safety. KEV's `dueDate` is catalog metadata, not a universal deadline.
+KEV membership sorts first even when a KEV CVE has no EPSS score and a non-KEV
+CVE scores 0.99; use `--kev-epss-floor` to demote KEV CVEs below the floor
+under non-KEV CVEs at or above it. Exploit maturity breaks ties within each
+tier: weaponized (Metasploit or Nuclei template) sorts above proof-of-concept,
+which sorts above none.
 
 ## Checks
 
