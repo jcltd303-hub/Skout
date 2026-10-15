@@ -33,6 +33,20 @@ python3 -u tools/random_targets.py --count 100 --port-profile exposure20 \
 To build the integrated scanner and `certs` command, install libpcap development
 headers/libraries and run `go build -o ip4scout ./cmd/ip4scout`.
 
+`ip4scout random` accepts `--seed` (deterministic RNG; 0 seeds from crypto/rand),
+`--count` (send exactly N packets, then exit; 0 scans forever), `--distinct`
+(resample until `--count` targets are distinct; default true), and `--ipv6`
+(generate IPv6 targets). `--version` prints the build version for both binaries.
+IPv6 mode affects target sampling only: raw IPv6 packet emission is not yet
+implemented, so IPv6 targets are skipped at send time with a log line.
+
+`certscout service` accepts `--min-tls-version` (1.0–1.3, default 1.2),
+`--verify-chain` (verify against system roots; default is observation-only),
+`--http-banner` (best-effort Server/title fetch on ports 443/8443),
+`--expiry-within-days` (drop certificate events expiring later than N days;
+error events pass through), and `--jarm` (10-probe JARM fingerprint on direct
+TLS endpoints; best-effort, empty when any probe fails).
+
 Both `tools/random_targets.py` and the rebuilt `ip4scout random` use the same
 bundled [masscan exclusions](data/MASSCAN.md) by default: all 332 active entries
 from the pinned upstream file, plus mandatory nonpublic/multicast exclusions.
@@ -141,8 +155,10 @@ x86-64 build artifacts. CI uses loopback fixtures; it performs no Internet scan.
 
 Derived from LeakIX/ip4scout, preserving its MIT license and attribution. This
 repository begins with a source snapshot; upstream history remains available in
-[LeakIX/ip4scout](https://github.com/LeakIX/ip4scout). The original Go module path
-is retained for compatibility. Certificate names are observations
+[LeakIX/ip4scout](https://github.com/LeakIX/ip4scout). The Go module path is now
+`github.com/jcltd303-hub/Skout`; the old import path `github.com/LeakIX/ip4scout`
+was the upstream module path and is no longer used — update imports when vendoring
+or forking from this repository. Certificate names are observations
 from an endpoint; they do not establish current DNS resolution, ownership or
 certificate-chain trust.
 

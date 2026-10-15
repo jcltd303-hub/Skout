@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/netip"
 	"os"
@@ -23,13 +24,27 @@ type ipv4Range struct {
 	last  uint32
 }
 
-type exclusionSet struct {
-	ranges    []ipv4Range
-	available uint64
+type ipv6Range struct {
+	first netip.Addr
+	last  netip.Addr
 }
 
-func newExclusionSet(ranges []ipv4Range) exclusionSet {
-	ordered := append([]ipv4Range(nil), ranges...)
+// parsedExclusion is one exclusion entry, either IPv4 or IPv6.
+type parsedExclusion struct {
+	isV6 bool
+	v4   ipv4Range
+	v6   ipv6Range
+}
+
+type exclusionSet struct {
+	ranges      []ipv4Range
+	v6Ranges    []ipv6Range
+	available   uint64
+	availableV6 *big.Int
+}
+
+func newExclusionSet(v4 []ipv4Range, v6 []ipv6Range) exclusionSet {
+	ordered := append([]ipv4Range(nil), v4...)
 	sort.Slice(ordered, func(i, j int) bool {
 		if ordered[i].first == ordered[j].first {
 			return ordered[i].last < ordered[j].last
@@ -48,11 +63,55 @@ func newExclusionSet(ranges []ipv4Range) exclusionSet {
 	for _, blocked := range merged {
 		available -= uint64(blocked.last) - uint64(blocked.first) + 1
 	}
-	return exclusionSet{ranges: merged, available: available}
+
+	orderedV6 := append([]ipv6Range(nil), v6...)
+	sort.Slice(orderedV6, func(i, j int) bool {
+		if c := orderedV6[i].first.Compare(orderedV6[j].first); c != 0 {
+			return c < 0
+		}
+		return orderedV6[i].last.Compare(orderedV6[j].last) < 0
+	})
+	mergedV6 := make([]ipv6Range, 0, len(orderedV6))
+	for _, current := range orderedV6 {
+		if len(mergedV6) == 0 {
+			mergedV6 = append(mergedV6, current)
+			continue
+		}
+		prev := &mergedV6[len(mergedV6)-1]
+		// Merge when current starts at or before one past the previous end.
+		next := prev.last.Next()
+		if !next.IsValid() || current.first.Compare(next) <= 0 {
+			if current.last.Compare(prev.last) > 0 {
+				prev.last = current.last
+			}
+			continue
+		}
+		mergedV6 = append(mergedV6, current)
+	}
+	availableV6 := new(big.Int).Lsh(big.NewInt(1), 128)
+	for _, blocked := range mergedV6 {
+		span := new(big.Int).Sub(addrToBig(blocked.last), addrToBig(blocked.first))
+		span.Add(span, big.NewInt(1))
+		availableV6.Sub(availableV6, span)
+	}
+	return exclusionSet{ranges: merged, v6Ranges: mergedV6, available: available, availableV6: availableV6}
+}
+
+func addrToBig(addr netip.Addr) *big.Int {
+	bytes := addr.As16()
+	return new(big.Int).SetBytes(bytes[:])
+}
+
+func bigToAddr(value *big.Int) netip.Addr {
+	var bytes [16]byte
+	value.FillBytes(bytes[:])
+	addr, _ := netip.AddrFromSlice(bytes[:])
+	return addr
 }
 
 func parseExclusions(reader io.Reader) (exclusionSet, error) {
-	var ranges []ipv4Range
+	var v4 []ipv4Range
+	var v6 []ipv6Range
 	scanner := bufio.NewScanner(reader)
 	line := 0
 	for scanner.Scan() {
@@ -65,15 +124,25 @@ func parseExclusions(reader io.Reader) (exclusionSet, error) {
 		if err != nil {
 			return exclusionSet{}, fmt.Errorf("line %d: %w", line, err)
 		}
-		ranges = append(ranges, blocked)
+		if blocked.isV6 {
+			v6 = append(v6, blocked.v6)
+		} else {
+			v4 = append(v4, blocked.v4)
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return exclusionSet{}, fmt.Errorf("read exclusions: %w", err)
 	}
-	return newExclusionSet(ranges), nil
+	return newExclusionSet(v4, v6), nil
 }
 
-func parseExclusion(text string) (ipv4Range, error) {
+// parseExclusion accepts a single address, a CIDR, or an inclusive range
+// (first-last) in either address family. A ':' in the text selects the IPv6
+// path; IPv6 addresses never contain '-', so range splitting is unambiguous.
+func parseExclusion(text string) (parsedExclusion, error) {
+	if strings.Contains(text, ":") {
+		return parseExclusionV6(text)
+	}
 	address := func(value string) (uint32, error) {
 		ip, err := netip.ParseAddr(strings.TrimSpace(value))
 		if err != nil || !ip.Is4() {
@@ -85,43 +154,87 @@ func parseExclusion(text string) (ipv4Range, error) {
 	if strings.Contains(text, "-") {
 		parts := strings.Split(text, "-")
 		if len(parts) != 2 {
-			return ipv4Range{}, fmt.Errorf("invalid IPv4 range %q", text)
+			return parsedExclusion{}, fmt.Errorf("invalid IPv4 range %q", text)
 		}
 		first, err := address(parts[0])
 		if err != nil {
-			return ipv4Range{}, err
+			return parsedExclusion{}, err
 		}
 		last, err := address(parts[1])
 		if err != nil {
-			return ipv4Range{}, err
+			return parsedExclusion{}, err
 		}
 		if first > last {
-			return ipv4Range{}, fmt.Errorf("reversed IPv4 range %q", text)
+			return parsedExclusion{}, fmt.Errorf("reversed IPv4 range %q", text)
 		}
-		return ipv4Range{first, last}, nil
+		return parsedExclusion{v4: ipv4Range{first, last}}, nil
 	}
 	if strings.Contains(text, "/") {
 		prefix, err := netip.ParsePrefix(text)
 		if err != nil || !prefix.Addr().Is4() {
-			return ipv4Range{}, fmt.Errorf("invalid IPv4 CIDR %q", text)
+			return parsedExclusion{}, fmt.Errorf("invalid IPv4 CIDR %q", text)
 		}
 		bytes := prefix.Masked().Addr().As4()
 		first := binary.BigEndian.Uint32(bytes[:])
 		last := uint64(first) + (uint64(1) << (32 - prefix.Bits())) - 1
-		return ipv4Range{first, uint32(last)}, nil
+		return parsedExclusion{v4: ipv4Range{first, uint32(last)}}, nil
 	}
 	value, err := address(text)
-	return ipv4Range{value, value}, err
+	return parsedExclusion{v4: ipv4Range{value, value}}, err
+}
+
+func parseExclusionV6(text string) (parsedExclusion, error) {
+	address := func(value string) (netip.Addr, error) {
+		ip, err := netip.ParseAddr(strings.TrimSpace(value))
+		if err != nil || ip.Is4() {
+			return netip.Addr{}, fmt.Errorf("invalid IPv6 address %q", value)
+		}
+		return ip, nil
+	}
+	if strings.Contains(text, "-") {
+		parts := strings.Split(text, "-")
+		if len(parts) != 2 {
+			return parsedExclusion{}, fmt.Errorf("invalid IPv6 range %q", text)
+		}
+		first, err := address(parts[0])
+		if err != nil {
+			return parsedExclusion{}, err
+		}
+		last, err := address(parts[1])
+		if err != nil {
+			return parsedExclusion{}, err
+		}
+		if first.Compare(last) > 0 {
+			return parsedExclusion{}, fmt.Errorf("reversed IPv6 range %q", text)
+		}
+		return parsedExclusion{isV6: true, v6: ipv6Range{first, last}}, nil
+	}
+	if strings.Contains(text, "/") {
+		prefix, err := netip.ParsePrefix(text)
+		if err != nil || prefix.Addr().Is4() {
+			return parsedExclusion{}, fmt.Errorf("invalid IPv6 CIDR %q", text)
+		}
+		first := prefix.Masked().Addr()
+		last := new(big.Int).Add(addrToBig(first), new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(128-prefix.Bits())), big.NewInt(1)))
+		return parsedExclusion{isV6: true, v6: ipv6Range{first, bigToAddr(last)}}, nil
+	}
+	value, err := address(text)
+	return parsedExclusion{isV6: true, v6: ipv6Range{value, value}}, err
 }
 
 func (set exclusionSet) contains(ip net.IP) bool {
-	v4 := ip.To4()
-	if v4 == nil {
+	if v4 := ip.To4(); v4 != nil {
+		value := binary.BigEndian.Uint32(v4)
+		index := sort.Search(len(set.ranges), func(i int) bool { return set.ranges[i].last >= value })
+		return index < len(set.ranges) && set.ranges[index].first <= value
+	}
+	v6 := ip.To16()
+	if v6 == nil {
 		return false
 	}
-	value := binary.BigEndian.Uint32(v4)
-	index := sort.Search(len(set.ranges), func(i int) bool { return set.ranges[i].last >= value })
-	return index < len(set.ranges) && set.ranges[index].first <= value
+	addr, _ := netip.AddrFromSlice(v6)
+	index := sort.Search(len(set.v6Ranges), func(i int) bool { return set.v6Ranges[i].last.Compare(addr) >= 0 })
+	return index < len(set.v6Ranges) && set.v6Ranges[index].first.Compare(addr) <= 0
 }
 
 // addressAt selects an allowed IPv4 address by its rank in the remaining space.
@@ -142,12 +255,56 @@ func (set exclusionSet) addressAt(rank uint64) net.IP {
 	return ipv4FromUint(uint32(cursor + rank))
 }
 
+// addressAtV6 selects an allowed IPv6 address by its rank in the remaining
+// space, mirroring addressAt for the 128-bit space.
+func (set exclusionSet) addressAtV6(rank *big.Int) net.IP {
+	if rank == nil || rank.Sign() < 0 || rank.Cmp(set.availableV6) >= 0 {
+		panic("IPv6 rank outside available target space")
+	}
+	remaining := new(big.Int).Set(rank)
+	cursor := netip.AddrFrom16([16]byte{})
+	for _, blocked := range set.v6Ranges {
+		gap := new(big.Int).Sub(addrToBig(blocked.first), addrToBig(cursor))
+		if remaining.Cmp(gap) < 0 {
+			return net.IP(bigToAddr(new(big.Int).Add(addrToBig(cursor), remaining)).AsSlice())
+		}
+		remaining.Sub(remaining, gap)
+		next := blocked.last.Next()
+		if !next.IsValid() {
+			// No address space remains past this range; remaining must be 0
+			// here because rank < availableV6, so this is unreachable.
+			panic("IPv6 rank outside available target space")
+		}
+		cursor = next
+	}
+	return net.IP(bigToAddr(new(big.Int).Add(addrToBig(cursor), remaining)).AsSlice())
+}
+
 func ipv4FromUint(value uint32) net.IP {
 	return net.IPv4(byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
 }
 
+// mandatoryV6Exclusions covers the non-global IPv6 space. It backs IsIpPublic
+// for IPv6 targets when no exclusion set has been prepared yet.
+var mandatoryV6Exclusions = func() exclusionSet {
+	set, err := parseExclusions(strings.NewReader(strings.Join(mandatoryV6Networks, "\n") + "\n"))
+	if err != nil {
+		panic(err)
+	}
+	return set
+}()
+
+var mandatoryV6Networks = []string{
+	"::1/128",
+	"fe80::/10",
+	"fc00::/7",
+	"ff00::/8",
+	"2001:db8::/32",
+}
+
 func (cmd *RandomCommand) prepareBlacklist() error {
 	var ranges []ipv4Range
+	var v6Ranges []ipv6Range
 	for _, network := range IPBlacklist {
 		if network == nil || network.IP.To4() == nil {
 			continue
@@ -160,13 +317,14 @@ func (cmd *RandomCommand) prepareBlacklist() error {
 		if err != nil {
 			return err
 		}
-		ranges = append(ranges, blocked)
+		ranges = append(ranges, blocked.v4)
 	}
 	if !cmd.DisableRecommended {
 		if masscanExclusionError != nil {
 			return fmt.Errorf("bundled masscan exclusions: %w", masscanExclusionError)
 		}
 		ranges = append(ranges, masscanExclusions.ranges...)
+		v6Ranges = append(v6Ranges, masscanExclusions.v6Ranges...)
 	}
 	for _, file := range []*os.File{cmd.BlacklistFile, cmd.ExcludeFile} {
 		if file == nil {
@@ -180,10 +338,23 @@ func (cmd *RandomCommand) prepareBlacklist() error {
 			return fmt.Errorf("exclusions %s: %w", file.Name(), err)
 		}
 		ranges = append(ranges, custom.ranges...)
+		v6Ranges = append(v6Ranges, custom.v6Ranges...)
 	}
-	set := newExclusionSet(ranges)
+	if cmd.IPv6 {
+		for _, network := range mandatoryV6Networks {
+			blocked, err := parseExclusion(network)
+			if err != nil {
+				return err
+			}
+			v6Ranges = append(v6Ranges, blocked.v6)
+		}
+	}
+	set := newExclusionSet(ranges, v6Ranges)
 	if set.available == 0 {
 		return fmt.Errorf("exclusions leave no IPv4 targets")
+	}
+	if cmd.IPv6 && (set.availableV6 == nil || set.availableV6.Sign() <= 0) {
+		return fmt.Errorf("exclusions leave no IPv6 targets")
 	}
 	cmd.exclusions = &set
 	return nil

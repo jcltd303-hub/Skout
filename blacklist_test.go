@@ -147,7 +147,7 @@ type brokenBlacklistReader struct{}
 func (brokenBlacklistReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
 
 func TestExclusionsRejectMalformedAndUnreadableFiles(t *testing.T) {
-	for _, value := range []string{"bad", "1.1.1.1/33", "1.1.1.1/032", "1.1.1.1/00", "::1", "::/0", "1.1.1.3-1.1.1.2", "1.1.1.1-", "1.1.1.1-2.2.2.2-3.3.3.3"} {
+	for _, value := range []string{"bad", "1.1.1.1/33", "1.1.1.1/032", "1.1.1.1/00", "1.1.1.3-1.1.1.2", "1.1.1.1-", "1.1.1.1-2.2.2.2-3.3.3.3", "2001:db8::1/129", "2001:db8::3-2001:db8::2", "2001:db8::1-", "::gggg"} {
 		if _, err := parseExclusions(strings.NewReader("# heading\n" + value)); err == nil || !strings.Contains(err.Error(), "line 2") {
 			t.Errorf("invalid entry %q should report line 2, got %v", value, err)
 		}
@@ -215,11 +215,14 @@ func TestRandomSamplesRemainingAddressesWithoutRejectionLoop(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for i := 0; i < 100; i++ {
-		ip := cmd.RandomPublicIp().String()
-		if ip != "8.8.8.8" && ip != "8.8.8.9" {
+		ip, err := cmd.RandomPublicIp()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ip.String() != "8.8.8.8" && ip.String() != "8.8.8.9" {
 			t.Fatalf("sampled excluded address %s", ip)
 		}
-		seen[ip] = true
+		seen[ip.String()] = true
 	}
 	if len(seen) != 2 {
 		t.Fatalf("failed to sample both available addresses: %v", seen)
