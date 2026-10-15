@@ -95,7 +95,7 @@ class RandomTargetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             extra = Path(folder) / "extra.conf"
             extra.write_text("0.0.0.0-8.8.8.7\n8.8.8.9-255.255.255.255\n")
-            result = subprocess.run([sys.executable, str(SCRIPT), "--count", "3", "--ports", "443", "--excludefile", str(extra)], cwd=folder, text=True, capture_output=True, timeout=5)
+            result = subprocess.run([sys.executable, str(SCRIPT), "--count", "3", "--ports", "443", "--no-distinct", "--excludefile", str(extra)], cwd=folder, text=True, capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual([json.loads(row) for row in result.stdout.splitlines()], [{"ip": "8.8.8.8", "port": 443}] * 3)
 
@@ -122,6 +122,106 @@ class RandomTargetTests(unittest.TestCase):
             self.assertEqual(stopped.exception.code, 2)
             self.assertEqual(output.getvalue(), "")
             self.assertIn("missing.conf", error.getvalue())
+
+
+class RandomTargetBatch2Tests(unittest.TestCase):
+    def test_seed_determinism(self):
+        args = [sys.executable, str(SCRIPT), "--count", "3", "--ports", "443", "--seed", "42"]
+        first = subprocess.run(args, text=True, capture_output=True, timeout=5)
+        second = subprocess.run(args, text=True, capture_output=True, timeout=5)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(first.stdout, second.stdout)
+        excluded = targets.load_exclusions()
+        rows1 = list(targets.generate_targets(10, (443,), excluded, random.Random(123)))
+        rows2 = list(targets.generate_targets(10, (443,), excluded, random.Random(123)))
+        self.assertEqual(rows1, rows2)
+
+    def test_distinct_has_no_duplicate_pairs(self):
+        excluded = targets.load_exclusions()
+        rows = list(targets.generate_targets(200, (443, 80), excluded, random.Random(5), distinct=True))
+        self.assertEqual(len(rows), 400)
+        self.assertEqual(len({(row["ip"], row["port"]) for row in rows}), 400)
+
+    def test_distinct_over_request_errors_before_emitting(self):
+        narrow = targets.Exclusions.from_text("0.0.0.0-8.8.8.7\n8.8.8.10-255.255.255.255\n")
+        with self.assertRaises(ValueError):
+            list(targets.generate_targets(3, (443,), narrow, random.Random(1), distinct=True))
+        with tempfile.TemporaryDirectory() as folder:
+            extra = Path(folder) / "extra.conf"
+            extra.write_text("0.0.0.0-8.8.8.7\n8.8.8.9-255.255.255.255\n")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--count", "3", "--ports", "443",
+                 "--excludefile", str(extra)],
+                text=True, capture_output=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+
+    def test_no_distinct_allows_duplicates(self):
+        narrow = targets.Exclusions.from_text("0.0.0.0-8.8.8.7\n8.8.8.10-255.255.255.255\n")
+        rows = list(targets.generate_targets(100, (443,), narrow, random.Random(1), distinct=False))
+        self.assertEqual(len(rows), 100)
+        self.assertEqual({row["ip"] for row in rows}, {"8.8.8.8", "8.8.8.9"})
+
+    def test_ipv6_mandatory_exclusions(self):
+        excluded = targets.load_exclusions_v6()
+        for value in ("::1", "fe80::1", "fe90::1", "fc00::1", "fdff::1", "ff02::1", "2001:db8::1"):
+            self.assertTrue(excluded.contains(value), value)
+        for value in ("2606:4700:4700::1111", "2001:4860:4860::8888", "2a00:1450:4000::1"):
+            self.assertFalse(excluded.contains(value), value)
+
+    def test_family_6_samples_valid_v6_outside_exclusions(self):
+        excluded = targets.load_exclusions_v6()
+        rows = list(targets.generate_targets(200, (443,), excluded, random.Random(11), family="6"))
+        self.assertEqual(len(rows), 200)
+        for row in rows:
+            address = ipaddress.IPv6Address(row["ip"])
+            self.assertEqual(address.version, 6)
+            self.assertFalse(excluded.contains(row["ip"]), row["ip"])
+            self.assertFalse(address in ipaddress.IPv6Network("::1/128")
+                             or address in ipaddress.IPv6Network("fe80::/10")
+                             or address in ipaddress.IPv6Network("fc00::/7")
+                             or address in ipaddress.IPv6Network("ff00::/8")
+                             or address in ipaddress.IPv6Network("2001:db8::/32"))
+
+    def test_family_both_mixes_families(self):
+        v4 = targets.load_exclusions()
+        v6 = targets.load_exclusions_v6()
+        rows = list(targets.generate_targets(200, (443,), v4, random.Random(3),
+                                             family="both", exclusions_v6=v6))
+        self.assertEqual({ipaddress.ip_address(row["ip"]).version for row in rows}, {4, 6})
+
+    def test_family_cli_flags(self):
+        for extra in (["--ipv6"], ["--family", "6"]):
+            result = subprocess.run([sys.executable, str(SCRIPT), "--count", "2", "--ports", "443",
+                                     *extra], text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = [json.loads(line) for line in result.stdout.splitlines()]
+            self.assertTrue(all(ipaddress.ip_address(row["ip"]).version == 6 for row in rows))
+        result = subprocess.run([sys.executable, str(SCRIPT), "--count", "50", "--ports", "443",
+                                 "--family", "both", "--seed", "7"],
+                                text=True, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual({ipaddress.ip_address(row["ip"]).version for row in rows}, {4, 6})
+
+    def test_v6_exclusion_parsing(self):
+        excluded = targets.ExclusionsV6.from_text("2001:db8::/32\n::1\n2001:db9::10 - 2001:db9::20\n")
+        for value in ("2001:db8::1", "::1", "2001:db9::10", "2001:db9::20"):
+            self.assertTrue(excluded.contains(value), value)
+        for value in ("2001:db9::1", "2001:db9::21", "::2"):
+            self.assertFalse(excluded.contains(value), value)
+        for value in ("gggg::1", "2001:db8::/129", "2001:db8::/032", "2001:db8::5-2001:db8::1"):
+            with self.assertRaisesRegex(ValueError, "line 2"):
+                targets.ExclusionsV6.from_text("# title\n" + value)
+
+    def test_v6_allowed_ranks_preserve_extremes(self):
+        excluded = targets.ExclusionsV6.from_text("::1-ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe\n")
+        self.assertEqual(excluded.available, 2)
+        rng = Mock()
+        rng.randrange.return_value = 0
+        self.assertEqual(str(excluded.random_address(rng)), "::")
+        rng.randrange.return_value = 1
+        self.assertEqual(str(excluded.random_address(rng)), "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
 
 
 if __name__ == "__main__":
