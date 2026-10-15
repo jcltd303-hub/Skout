@@ -27,7 +27,7 @@ the selected set. Review order does not change the configured network rate.
 | 11 | 27017 | MongoDB | TCP only |
 | 12 | 9200 | Elasticsearch HTTP or HTTPS | TCP only |
 | 13 | 1433 | Microsoft SQL Server | TCP only |
-| 14 | 5432 | PostgreSQL | TCP only |
+| 14 | 5432 | PostgreSQL | PostgreSQL STARTTLS (see precedence note below) |
 | 15 | 3306 | MySQL | TCP only |
 | 16 | 443 | HTTPS | Direct TLS |
 | 17 | 8443 | Alternate HTTPS | Direct TLS |
@@ -59,6 +59,12 @@ requires its original packet-capture privileges and platform support.
 `--list-ports` prints the effective comma-separated selection and exits. Explicit
 ports override the selected profile. Both generators also support
 `--port-profile certificates`; the native `--certificate-profile` flag remains.
+
+Precedence note: the profile's `collector_mode` is only a hint. The
+collector's explicit port table wins over hints, then the hint, then direct
+TLS — so port 5432 runs the PostgreSQL SSLRequest upgrade even though this
+profile lists its hint as `tcp`, and an explicit `--protocol` or endpoint
+`protocol` field wins over both. See the README's Collector behavior section.
 
 `tcp_connected: true` records at least one established TCP connection for the
 outcome, including a connection whose subsequent TLS exchange failed. The stderr

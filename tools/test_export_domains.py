@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import random
 import sqlite3
 import tempfile
 import unittest
@@ -225,6 +226,21 @@ class ExportBatch2Tests(unittest.TestCase):
         self.assertEqual(metrics['imported'],1)
         self.assertEqual(metrics['duplicates'],10000)
         self.assertIsInstance(metrics['elapsed_seconds'],(int,float))
+
+
+class TestNormalizeProperties(unittest.TestCase):
+    def test_normalize_never_crashes_and_round_trips(self):
+        rng=random.Random(42)
+        alphabet='abcXYZ019._-*:/\\ \t@'
+        for _ in range(200):
+            value=''.join(rng.choice(alphabet) for _ in range(rng.randrange(0,30)))
+            result=exporter.normalize(value)
+            if result is not None:
+                self.assertEqual(result,result.lower())
+                self.assertFalse(result.endswith('.'))
+                self.assertEqual(exporter.normalize(result),result)
+        for value in (None,123,4.5,b'example.test',['example.test'],{'x':1}):
+            self.assertIsNone(exporter.normalize(value))
 
 
 if __name__=='__main__':

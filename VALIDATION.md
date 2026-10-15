@@ -1,5 +1,60 @@
 # Delivered validation
 
+## Batch 1–3 hardening validation
+
+Batch 3 (Docs/CI/DX + full verification), run 2026-10-15 on this tree at
+remote HEAD `ba03c90` plus uncommitted Batch 3 changes. Go toolchain
+1.26.9 (the `go.mod` pin), Python 3.12, local libpcap dev headers present.
+
+- `go test -race ./... -count=1 -timeout=180s`: **passed** — root,
+  certificates, portprofiles packages ok; `cmd/*`, `version` have no test
+  files.
+- `go vet ./...`: **passed**.
+- `govulncheck ./...`: **"No vulnerabilities found."**
+- `gofmt -l .`: empty. `git diff --check`: clean.
+- `python3 -m unittest discover -s tools -p 'test_*.py' -v`: **74 tests,
+  OK** (71 pre-existing + 3 new property-test classes: 1 normalize in
+  `test_export_domains.py`, 2 parse/exclusion in `test_random_targets.py`;
+  suite runs in ~3.1s).
+- Builds: `CGO_ENABLED=0 go build ./cmd/certscout` ok;
+  `go build ./cmd/ip4scout` ok (libpcap headers present);
+  `CGO_ENABLED=0 GOOS=linux GOARCH=arm64` certscout ok;
+  `CGO_ENABLED=0 GOOS=darwin GOARCH=arm64` certscout ok;
+  `make termux` ok — output `bin/certscout-termux` verified as
+  `ELF 64-bit LSB pie executable, ARM aarch64, ... interpreter
+  /system/bin/linker64`.
+- `--version`: `certscout dev`, `ip4scout dev`,
+  `ip4scout random --version` → `ip4scout dev` (local unstamped builds).
+- `--list-ports` agreement: Go `ip4scout random --list-ports` and Python
+  `random_targets.py --list-ports` printed identical output for both
+  profiles — exposure20:
+  `2375,10250,6443,445,3389,5985,5986,5900,22,6379,27017,9200,1433,5432,3306,443,8443,80,8080,21`;
+  certificates: `443,587,21,465,993,995,8443`
+  (`--certificate-profile` alias agrees too). No docs/code mismatch found.
+- Smoke: `python3 tools/random_targets.py --count 5 --ports 443 --seed 42 |
+  ./certscout service --max-threads=4 --rate-limit=10 --timeout=3s` exited
+  **0** with 5 outcomes: 5 TCP-connected, 0 certificates, 5 errors
+  (TLS handshake failures against random public IPs — expected; no crash).
+- Loopback E2E: covered by the passing Go suite —
+  `TestCollectChainExpiryAndVerify` asserts `chain_length`, `expires_in_days`
+  and `chain_validation` on a loopback fixture, and
+  `TestHTTPBannerLoopback` asserts the `http_banner` (`server`/`title`/
+  `status`) fields. No separate manual E2E was run.
+- Finite determinism: `TestRandomSeedDeterminism` **passed**.
+- Fuzz (10s each, no crashes): `FuzzNormalizeName` (20,339 execs),
+  `FuzzParseTarget` (126,764 execs), `FuzzReplyReader` (130,611 execs),
+  `FuzzParseExclusion` (32,846 execs). No `testdata/fuzz/` corpus files
+  were left behind (interesting inputs stay in the Go build cache).
+- `make build`, `make vet`, `make lint` (vet + gofmt + Python
+  byte-compile): all passed.
+
+Documented limits (not verified, not claimed): `CGO_ENABLED=0` does **not**
+cover the `ip4scout` SYN scanner — it links libpcap via cgo by design and
+builds only where libpcap-dev is installed (CI: linux/amd64). Android
+execution is untested on a phone; only the cross-build is verified. No live
+scan was performed. JARM is best-effort (empty when any probe fails) and a
+JARM fingerprint against a real TLS stack is unverified.
+
 ## Exposure20 default profile update
 
 Both endpoint generators now default to the same 20-port selection. Its JSON

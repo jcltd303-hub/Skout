@@ -224,5 +224,34 @@ class RandomTargetBatch2Tests(unittest.TestCase):
         self.assertEqual(str(excluded.random_address(rng)), "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
 
 
+class TestParseProperties(unittest.TestCase):
+    def test_parse_ports_never_crashes_and_round_trips(self):
+        rng = random.Random(42)
+        alphabet = "0123456789, abc-./x"
+        for _ in range(200):
+            text = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 30)))
+            try:
+                result = targets.parse_ports(text)
+            except ValueError:
+                continue
+            self.assertIsInstance(result, tuple)
+            self.assertEqual(len(result), len(set(result)))
+            self.assertTrue(all(isinstance(p, int) and 1 <= p <= 65535 for p in result))
+        for _ in range(100):
+            ports = [rng.randrange(1, 65536) for _ in range(rng.randrange(1, 6))]
+            want = tuple(dict.fromkeys(ports))
+            self.assertEqual(targets.parse_ports(",".join(str(p) for p in ports)), want)
+
+    def test_exclusion_parsing_never_crashes(self):
+        rng = random.Random(42)
+        alphabet = "0123456789abcdef:./-# \n"
+        for _ in range(100):
+            text = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 40)))
+            try:
+                targets.Exclusions.from_text(text)
+            except ValueError:
+                pass
+
+
 if __name__ == "__main__":
     unittest.main()

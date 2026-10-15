@@ -63,3 +63,65 @@
 - `version` package with `Version = "dev"`; `certscout --version`,
   `ip4scout --version`, and `ip4scout random --version` print the binary name
   and version and exit 0.
+
+### Batch 3 — Docs/CI/DX + verification
+
+### Changed
+
+- CI (`.github/workflows/go.yml`): Go version is the `go.mod` pin
+  (`1.26.9`); adds a `govulncheck ./...` step; build matrix is
+  linux/amd64 + linux/arm64 + darwin/arm64 with `CGO_ENABLED=0` for
+  certscout everywhere and `ip4scout` gated to linux/amd64 (libpcap needs
+  cgo by design); artifact retention 7 → 30 days. Existing test steps
+  (race suite, vet, Python unittest) kept, plus a `gofmt -l .` emptiness
+  check.
+- Go 1.26.9 rationale: Go 1.23 reached end-of-life when Go 1.25 shipped
+  (only the two most recent major releases are supported), so the
+  toolchain moves to the pinned 1.26.9, against which `govulncheck ./...`
+  reports no vulnerabilities (see VALIDATION.md for the actual run).
+- `docs/port-profile.md`: port 5432 row corrected from "TCP only" to
+  "PostgreSQL STARTTLS" with a precedence note. Exposure20 merge note:
+  the exposure20 profile's `collector_mode` for 5432 is `tcp`, but the
+  collector's explicit port table (5432 → postgres) beats profile hints,
+  so 5432 endpoints run the PostgreSQL SSLRequest upgrade unless an
+  explicit `--protocol` / endpoint `protocol` override wins. Explicit
+  port table > profile hint > direct TLS.
+- README: `README-certificate-scout.md` folded into `README.md` (protocols
+  table incl. new STARTTLS modes + tcp mode + 5432 precedence note, flags
+  tables for all binaries/tools, pipeline examples, Termux, replay
+  instructions, rate tuning, practical limits) and the separate file
+  deleted. All internal links updated; required Go version corrected to
+  1.26.9. A stale "no banner fuzzing, deep HTTP, JARM" sentence from the
+  pre-Batch-1 guide was dropped — banner and JARM exist as best-effort
+  observations.
+
+### Added
+
+- `.github/workflows/release.yml`: on `v*` tags, builds certscout for
+  linux/amd64, linux/arm64, darwin/arm64 + ip4scout for linux/amd64,
+  stamps `version.Version` with the tag, and attaches binaries + LICENSE +
+  `data/` files via `softprops/action-gh-release`.
+- `.github/dependabot.yml`: gomod + github-actions, weekly, 5 open PRs each.
+- `Makefile`: `build`, `test`, `vet`, `lint` (vet + gofmt check + Python
+  byte-compile), `release` (local matrix into `bin/`), `clean`, `termux`
+  (`CGO_ENABLED=0 GOOS=android GOARCH=arm64` certscout into
+  `bin/certscout-termux`). Makefile matrix, no GoReleaser.
+- `ARCHITECTURE.md`: pipeline diagram, package map, data flow, key
+  invariants (dedup, exclusions, atomic writes, best-effort JARM/banner).
+- `CONTRIBUTING.md`: build/test, commit style, PR checks, fuzz instructions.
+- `SECURITY.md`: vulnerability reporting via GitHub Security Advisories,
+  scanning-authorization requirement, no active exploitation (discovery
+  only: handshakes, no auth attempts, no payloads), data handling
+  (certificates are public observations; no credentials).
+- `VALIDATION.md`: new "Batch 1–3 hardening validation" section with actual
+  Batch 3 results (go test/vet/govulncheck, Python count, builds,
+  `--version`, `--list-ports` agreement, smoke, loopback E2E, finite
+  determinism, fuzz).
+- Go native fuzz: `FuzzNormalizeName`, `FuzzParseTarget`, `FuzzReplyReader`
+  in `certificates/fuzz_test.go`; `FuzzParseExclusion` in root
+  `fuzz_test.go` (small seed corpora, no crashes in 10s runs).
+- Python property-style tests with fixed seed 42:
+  `TestNormalizeProperties` in `test_export_domains.py` (normalize never
+  crashes, lowercase output, no trailing dot, idempotent) and
+  `TestParseProperties` in `test_random_targets.py` (parse_ports /
+  exclusion parsing never crash, parse round-trips).
