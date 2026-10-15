@@ -1,5 +1,36 @@
 # Delivered validation
 
+## Vulnerability prioritization update
+
+The Python prioritizer ranks supplied CVE findings, defaulting to 20 unique CVEs
+with KEV membership first and EPSS probability descending within each tier.
+It performs no vulnerability probes and does not infer CVEs from certificates.
+
+All 41 Python tests passed, including 23 new prioritization tests. The new
+coverage includes ranking/ties, duplicate and distinct evidence, zero versus
+missing scores, future/stale/mixed feed dates, malformed inventories and
+probabilities, feed counts/pagination, unexpected CVEs, 100-entry/2,000-character
+request bounds, no retry on transport failure, offline CLI operation, stdin,
+atomic report replacement and unchanged reports after failure. Tests use
+offline fixtures and mocked feed transport, with no live feed dependency.
+
+Independent review found one important issue: a redirected stdin inventory
+could be replaced when its path was also passed as `--output`. A subprocess
+regression reproduced the overwrite before the fix. The output guard now
+compares the redirected regular-file descriptor with the output file identity;
+the regression and all 41 tests pass after the fix. No findings remain deferred.
+
+The full Go race suite (`-count=1 -timeout=120s`) and `go vet ./...` also passed.
+An additional live feed-format smoke check used a synthetic inventory record
+and retrieved KEV release `2026-10-14T19:27:28.0105Z` and EPSS scores dated
+`2026-10-14`. It connected only to the two official feeds, never to the example
+asset. This check is outside CI and is not an assessment of any real host.
+The tool uses Python 3.9+ standard-library features; validation ran on Python
+3.12. Actual Termux execution remains untested on a phone. Supplied CVE findings
+remain unverified by this report.
+
+## Original certificate scout validation
+
 Source baseline: LeakIX/ip4scout commit
 `46c7982059652e76402c839e6962a2eb6de4f773`.
 

@@ -50,10 +50,65 @@ stop generation. The collector still accepts explicitly supplied endpoints.
 - Optional SNI follow-ups confined to the original IP and port.
 - NDJSON success/error outcomes and per-port result counts.
 - Durable SQLite evidence, unique-name streaming and restart-safe exports.
+- A Termux-compatible top-20 remediation report for supplied CVE findings.
 
 See [the collector guide](README-certificate-scout.md) for protocols, flags,
 port profiles, replay instructions, rate tuning and practical limits. See
 [validation](VALIDATION.md) for local test results and review corrections.
+
+## Prioritize vulnerability findings
+
+Use an existing vulnerability inventory to produce a **top 20 unique CVEs** by
+default. [CISA KEV](https://github.com/cisagov/kev-data) entries sort first;
+within each tier, [FIRST EPSS](https://www.first.org/epss/) probability sorts
+descending, with CVE ID breaking ties. This is a remediation policy, not a
+universal list of the 20 most exploitable vulnerabilities.
+
+On Termux, the Python tool needs no additional packages or root:
+
+```bash
+git pull --ff-only
+python3 tools/prioritize_vulnerabilities.py \
+  --inventory findings.jsonl --top 20 --output top20.json
+```
+
+Supply one JSON object per line with `asset` and `cve`. Optional `source` and
+`evidence` fields must also be strings; other fields are rejected. This example
+shows the schema; replace it with findings from your actual software inventory:
+
+```json
+{"asset":"server.example.test","cve":"CVE-2014-0160","source":"inventory export","evidence":"Example only: replace with verified software/version evidence."}
+```
+
+The report retains distinct asset/evidence records, removes exact duplicates,
+and includes KEV remediation guidance, feed provenance and dates. A zero EPSS
+score is retained; unavailable scores are `null` and listed in `unscored_cves`
+even when outside the top 20. Fewer than 20 input CVEs produce fewer results.
+Input is limited to 10,000 rows and 8 MiB. `--inventory -` reads stdin.
+
+Online mode retrieves CISA's complete official mirror and sends only CVE IDs to
+the FIRST API in bounded batches. It never connects to inventory assets. To use
+saved feeds without network requests:
+
+```bash
+python3 tools/prioritize_vulnerabilities.py --inventory findings.jsonl \
+  --offline --kev-file kev.json --epss-file epss.json --output top20.json
+```
+
+`kev.json` must be the complete upstream KEV JSON document; `epss.json` must be
+a complete [FIRST API response](https://api.first.org/epss/), including its
+pagination fields. Missing CVEs in that response remain unscored. Truncated,
+malformed, future-dated or stale feeds fail without replacing an existing
+`--output` report. Default freshness limits are 30 days for KEV's release and
+3 days for EPSS scores, configurable with `--max-kev-age-days` and
+`--max-epss-age-days` (zero requires today's date). Mixed EPSS dates fail.
+Each feed response is capped at 8 MiB; each request times out after 20 seconds.
+
+CVE applicability is supplied by your inventory and explicitly marked unverified
+by Skout. Certificate output alone cannot supply that evidence. EPSS estimates
+exploitation in the next 30 days across the population, not the chance of
+compromise of a particular asset. Absence from KEV or a missing score does not
+establish safety. KEV's `dueDate` is catalog metadata, not a universal deadline.
 
 ## Checks
 
