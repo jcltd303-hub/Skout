@@ -1,8 +1,10 @@
 import copy
+import csv
 from datetime import date, datetime, timezone
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -349,6 +351,250 @@ class PriorityCLITests(unittest.TestCase):
                 self.assertEqual(run.stdout, "")
                 self.assertTrue(run.stderr)
         self.assertEqual(self.inventory.read_text(), original)
+
+
+class PriorityBatch2Tests(unittest.TestCase):
+    def setUp(self):
+        self.assertIsNotNone(priority, "top-20 vulnerability prioritizer is missing")
+
+    def report(self, findings, kev=(), scores=(), top=20, **kwargs):
+        return priority.build_report(
+            findings, priority.parse_kev(kev_doc(*kev), TODAY, 30),
+            priority.parse_epss(epss_doc(*scores), TODAY, 3), top, NOW, **kwargs,
+        )
+
+    def test_policy_notes_document_kev_first(self):
+        report = self.report([finding("CVE-2026-0001")])
+        self.assertIn(
+            "KEV-unscored outranks non-KEV even at EPSS 0.99 (KEV membership sorts first); "
+            "use --kev-epss-floor to change this.", report["policy_notes"])
+
+    def test_kev_epss_floor_demotes_low_kev(self):
+        findings = [finding("CVE-2026-0001"), finding("CVE-2026-0002")]
+        scores = (("CVE-2026-0001", .10), ("CVE-2026-0002", .99))
+        self.assertEqual([row["cve"] for row in self.report(findings, kev=("CVE-2026-0001",),
+                         scores=scores)["vulnerabilities"]],
+                         ["CVE-2026-0001", "CVE-2026-0002"])
+        self.assertEqual([row["cve"] for row in self.report(findings, kev=("CVE-2026-0001",),
+                         scores=scores, kev_epss_floor=0.5)["vulnerabilities"]],
+                         ["CVE-2026-0002", "CVE-2026-0001"])
+        # KEV-unscored with a floor drops below non-KEV at/above the floor.
+        unscored = self.report(findings, kev=("CVE-2026-0001",),
+                               scores=(("CVE-2026-0002", .9),), kev_epss_floor=0.5)
+        self.assertEqual([row["cve"] for row in unscored["vulnerabilities"]],
+                         ["CVE-2026-0002", "CVE-2026-0001"])
+
+    def test_cvss_file_tiebreak_and_validation(self):
+        rows = [{"cve": "CVE-2026-0001", "cvss_v31_base_score": 9.8,
+                 "cvss_v31_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                 "cvss_v31_severity": "critical"},
+                {"cve": "CVE-2026-0002", "cvss_v31_base_score": 4.3,
+                 "cvss_v31_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N",
+                 "cvss_v31_severity": "medium"}]
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "cvss.json"
+            path.write_text(json.dumps(rows), encoding="utf-8")
+            cvss = priority.load_cvss_file(path)
+            path.write_text(json.dumps({"vulnerabilities": rows}), encoding="utf-8")
+            self.assertEqual(priority.load_cvss_file(path), cvss)
+            bad = dict(rows[0], cvss_v31_base_score=11)
+            path.write_text(json.dumps([bad]), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                priority.load_cvss_file(path)
+            bad = dict(rows[0], cvss_v31_severity="bogus")
+            path.write_text(json.dumps([bad]), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                priority.load_cvss_file(path)
+        findings = [finding("CVE-2026-0001"), finding("CVE-2026-0002"), finding("CVE-2026-0003")]
+        scores = (("CVE-2026-0001", .5), ("CVE-2026-0002", .5), ("CVE-2026-0003", .5))
+        report = self.report(findings, scores=scores, cvss=cvss)
+        self.assertEqual([row["cve"] for row in report["vulnerabilities"]],
+                         ["CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0003"])
+        self.assertEqual(report["vulnerabilities"][0]["cvss"]["severity"], "CRITICAL")
+        self.assertIsNone(report["vulnerabilities"][2]["cvss"])
+
+    def test_inventory_criticality_and_exposure(self):
+        row = {"asset": "host.example.test", "cve": "CVE-2026-0001", "source": "s",
+               "evidence": "e", "criticality": "CRITICAL", "exposure": "Internet"}
+        findings = priority.load_inventory(io.StringIO(json.dumps(row) + "\n"))
+        self.assertEqual(findings[0]["criticality"], "critical")
+        self.assertEqual(findings[0]["exposure"], "internet")
+        bad = dict(row, criticality="urgent")
+        with self.assertRaisesRegex(ValueError, "line 1"):
+            priority.load_inventory(io.StringIO(json.dumps(bad) + "\n"))
+        report = self.report(findings)
+        self.assertEqual(report["vulnerabilities"][0]["findings"][0]["criticality"], "critical")
+        self.assertEqual(report["vulnerabilities"][0]["findings"][0]["exposure"], "internet")
+
+    def test_criticality_weight_reorders_by_effective_epss(self):
+        low = finding("CVE-2026-0001", asset="critical-host")
+        low = dict(low, criticality="critical")
+        mid = finding("CVE-2026-0002", asset="medium-host")
+        scores = (("CVE-2026-0001", .5), ("CVE-2026-0002", .6))
+        plain = self.report([low, mid], scores=scores)
+        self.assertEqual([row["cve"] for row in plain["vulnerabilities"]],
+                         ["CVE-2026-0002", "CVE-2026-0001"])
+        self.assertEqual(plain["vulnerabilities"][0]["effective_epss"], .6)
+        weighted = self.report([low, mid], scores=scores, criticality_weight=1.0)
+        self.assertEqual([row["cve"] for row in weighted["vulnerabilities"]],
+                         ["CVE-2026-0001", "CVE-2026-0002"])
+        self.assertAlmostEqual(weighted["vulnerabilities"][0]["effective_epss"], .8)
+        self.assertEqual(weighted["vulnerabilities"][1]["effective_epss"], .6)
+        unscored = self.report([low], scores=(), criticality_weight=1.0)
+        self.assertIsNone(unscored["vulnerabilities"][0]["effective_epss"])
+
+    def test_exploit_file_maturity_sorts_within_tier(self):
+        rows = [{"cve": "CVE-2026-0001", "metasploit": True},
+                {"cve": "CVE-2026-0002", "public_poc": True},
+                {"cve": "CVE-2026-0003"}]
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "exploit.json"
+            path.write_text(json.dumps(rows), encoding="utf-8")
+            exploit = priority.load_exploit_file(path)
+            path.write_text(json.dumps([{"cve": "CVE-2026-0001", "metasploit": "yes"}]), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                priority.load_exploit_file(path)
+        self.assertEqual(exploit["CVE-2026-0001"]["maturity"], "weaponized")
+        self.assertEqual(exploit["CVE-2026-0002"]["maturity"], "poc")
+        self.assertEqual(exploit["CVE-2026-0003"]["maturity"], "none")
+        findings = [finding(f"CVE-2026-000{i}") for i in (3, 2, 1)]
+        scores = ((f"CVE-2026-000{i}", .5) for i in (1, 2, 3))
+        report = self.report(findings, scores=tuple(scores), exploit=exploit)
+        self.assertEqual([row["cve"] for row in report["vulnerabilities"]],
+                         ["CVE-2026-0001", "CVE-2026-0002", "CVE-2026-0003"])
+        self.assertEqual([row["exploit_maturity"] for row in report["vulnerabilities"]],
+                         ["weaponized", "poc", "none"])
+
+    def test_cache_serves_second_run_and_stale_refetches(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            inventory = root / "inventory.jsonl"
+            inventory.write_text(json.dumps(finding("CVE-2026-0001")) + "\n", encoding="utf-8")
+            cache = root / "cache"
+            today = datetime.now(timezone.utc)
+            kev = kev_doc("CVE-2026-0001")
+            kev["dateReleased"] = today.isoformat()
+            epss = epss_doc(("CVE-2026-0001", .75))
+            epss["data"][0]["date"] = today.date().isoformat()
+
+            def serve(request, timeout):
+                if request.full_url.startswith(priority.KEV_URL):
+                    return io.BytesIO(json.dumps(kev).encode())
+                return io.BytesIO(json.dumps(epss).encode())
+
+            args = ["--inventory", str(inventory), "--cache-dir", str(cache),
+                    "--output", str(root / "out.json")]
+            with patch.object(priority.urllib.request, "urlopen", side_effect=serve) as opened:
+                self.assertEqual(priority.main(args), 0)
+                self.assertEqual(opened.call_count, 2)
+                self.assertTrue((cache / "kev.json").exists())
+                self.assertEqual(len(list(cache.glob("epss-*.json"))), 1)
+            with patch.object(priority.urllib.request, "urlopen", side_effect=serve) as opened:
+                self.assertEqual(priority.main(args), 0)
+                self.assertEqual(opened.call_count, 0, "fresh cache must not hit the network")
+            old = today.timestamp() - 40 * 86400
+            for path in cache.iterdir():
+                os.utime(path, (old, old))
+            with patch.object(priority.urllib.request, "urlopen", side_effect=serve) as opened:
+                self.assertEqual(priority.main(args), 0)
+                self.assertEqual(opened.call_count, 2, "stale cache must refetch")
+            with patch.object(priority.urllib.request, "urlopen", side_effect=serve) as opened:
+                self.assertEqual(priority.main([*args, "--no-cache"]), 0)
+                self.assertEqual(opened.call_count, 2, "--no-cache must bypass the cache")
+
+    def test_inventory_cyclonedx(self):
+        doc = {
+            "components": [
+                {"bom-ref": "pkg:npm/lodash@4.17.21", "name": "lodash", "version": "4.17.21"},
+                {"bom-ref": "pkg:npm/react@18.2.0", "name": "react", "version": "18.2.0"},
+            ],
+            "vulnerabilities": [
+                {"id": "CVE-2026-0001", "affects": [{"ref": "pkg:npm/lodash@4.17.21"}]},
+                {"id": "CVE-2026-0002", "affects": [{"ref": "pkg:npm/react@18.2.0"},
+                                                   {"ref": "pkg:npm/unknown@1.0"}]},
+            ],
+        }
+        findings = priority.load_inventory_cyclonedx(doc)
+        self.assertEqual({(row["asset"], row["cve"]) for row in findings},
+                         {("lodash@4.17.21", "CVE-2026-0001"),
+                          ("react@18.2.0", "CVE-2026-0002"),
+                          ("pkg:npm/unknown@1.0", "CVE-2026-0002")})
+        fallback = {"components": [
+            {"bom-ref": "pkg:npm/lodash@4.17.21", "name": "lodash", "version": "4.17.21",
+             "properties": [{"name": "cve", "value": "CVE-2026-0001"}]}]}
+        self.assertEqual(priority.load_inventory_cyclonedx(fallback),
+                         [{"asset": "lodash@4.17.21", "cve": "CVE-2026-0001",
+                           "source": "cyclonedx", "evidence": "",
+                           "criticality": "medium", "exposure": "unknown"}])
+
+    def test_inventory_spdx(self):
+        doc = {"packages": [
+            {"name": "lodash", "versionInfo": "4.17.21",
+             "externalRefs": [{"referenceType": "cve", "referenceLocator": "CVE-2026-0001"},
+                              {"referenceType": "cpe", "referenceLocator": "cpe:2.3:a:x"}]},
+            {"name": "react", "versionInfo": "18.2.0",
+             "externalRefs": [{"referenceType": "cve",
+                               "referenceLocator": "https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-0002"}]},
+        ]}
+        findings = priority.load_inventory_spdx(doc)
+        self.assertEqual({(row["asset"], row["cve"]) for row in findings},
+                         {("lodash@4.17.21", "CVE-2026-0001"),
+                          ("react@18.2.0", "CVE-2026-0002")})
+
+    def test_csv_and_sarif_serialization(self):
+        findings = [finding("CVE-2026-0001"), finding("CVE-2026-0002", asset="other.example.test")]
+        report = self.report(findings, kev=("CVE-2026-0001",), scores=(("CVE-2026-0001", .75),))
+        csv_text = priority.report_to_csv(report)
+        rows = list(csv.reader(io.StringIO(csv_text)))
+        self.assertEqual(rows[0], ["rank", "cve", "known_exploited", "epss", "epss_percentile",
+                                   "cvss", "exploit_maturity", "assets"])
+        self.assertEqual(rows[1][:3], ["1", "CVE-2026-0001", "true"])
+        self.assertEqual(rows[1][7], "host.example.test")
+        self.assertEqual(rows[2][2], "false")
+        sarif = json.loads(priority.report_to_sarif(report))
+        self.assertEqual(sarif["version"], "2.1.0")
+        self.assertEqual(sarif["runs"][0]["tool"]["driver"]["name"], "Skout")
+        self.assertEqual(sarif["runs"][0]["results"][0]["ruleId"], "CVE-2026-0001")
+        self.assertEqual(sarif["runs"][0]["results"][0]["level"], "error")
+        self.assertIn("cisa_kev", sarif["runs"][0]["results"][0]["message"]["text"])
+        self.assertIn("0.75", sarif["runs"][0]["results"][0]["message"]["text"])
+        self.assertEqual(sarif["runs"][0]["results"][1]["level"], "warning")
+
+    def test_cli_csv_sarif_stdout_and_atomicity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            inventory = root / "inventory.jsonl"
+            inventory.write_text(json.dumps(finding("CVE-2026-0001")) + "\n", encoding="utf-8")
+            kev = root / "kev.json"
+            kev_doc_data = kev_doc("CVE-2026-0001")
+            kev_doc_data["dateReleased"] = datetime.now(timezone.utc).isoformat()
+            kev.write_text(json.dumps(kev_doc_data), encoding="utf-8")
+            epss = root / "epss.json"
+            epss_doc_data = epss_doc(("CVE-2026-0001", .75))
+            epss_doc_data["data"][0]["date"] = datetime.now(timezone.utc).date().isoformat()
+            epss.write_text(json.dumps(epss_doc_data), encoding="utf-8")
+            base = ["--inventory", str(inventory), "--offline",
+                    "--kev-file", str(kev), "--epss-file", str(epss)]
+            csv_run = subprocess.run([sys.executable, str(TOOL), *base, "--format", "csv"],
+                                     capture_output=True, text=True, timeout=10)
+            self.assertEqual(csv_run.returncode, 0, csv_run.stderr)
+            rows = list(csv.reader(io.StringIO(csv_run.stdout)))
+            self.assertEqual(rows[0][1], "cve")
+            self.assertEqual(rows[1][1], "CVE-2026-0001")
+            sarif_run = subprocess.run([sys.executable, str(TOOL), *base, "--format", "sarif"],
+                                       capture_output=True, text=True, timeout=10)
+            self.assertEqual(sarif_run.returncode, 0, sarif_run.stderr)
+            self.assertEqual(json.loads(sarif_run.stdout)["runs"][0]["results"][0]["ruleId"],
+                             "CVE-2026-0001")
+            output = root / "out.csv"
+            output.write_text("previous report\n")
+            epss_doc_data["data"][0]["date"] = "2020-01-01"
+            epss.write_text(json.dumps(epss_doc_data), encoding="utf-8")
+            failed = subprocess.run([sys.executable, str(TOOL), *base, "--format", "csv",
+                                     "--output", str(output)],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(output.read_text(), "previous report\n")
 
 
 if __name__ == "__main__":
