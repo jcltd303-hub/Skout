@@ -54,7 +54,7 @@ func Main(args []string) int {
 		fmt.Fprintln(os.Stderr, "Usage: certscout [service] [flags] < endpoints.jsonl")
 		fs.PrintDefaults()
 	}
-	fs.IntVar(&cmd.MaxThreads, "max-threads", cmd.MaxThreads, "Maximum concurrent certificate workers")
+	fs.IntVar(&cmd.MaxThreads, "max-threads", cmd.MaxThreads, "Maximum concurrent service workers")
 	fs.IntVar(&cmd.QueueSize, "queue-size", cmd.QueueSize, "Maximum queued endpoints")
 	fs.IntVar(&cmd.RateLimit, "rate-limit", cmd.RateLimit, "Global TCP connection starts/second, including retries and SNI")
 	fs.DurationVar(&cmd.Timeout, "timeout", cmd.Timeout, "Total deadline per connection attempt")
@@ -62,7 +62,7 @@ func Main(args []string) int {
 	fs.IntVar(&cmd.SNILimit, "sni-limit", cmd.SNILimit, "Maximum same-IP/port concrete SAN follow-ups")
 	fs.IntVar(&cmd.DedupCapacity, "dedup-capacity", cmd.DedupCapacity, "Maximum cached endpoint/SNI keys")
 	fs.DurationVar(&cmd.DedupTTL, "dedup-ttl", cmd.DedupTTL, "Endpoint duplicate suppression window")
-	fs.StringVar(&cmd.Protocol, "protocol", "auto", "auto, tls, smtp, ftp, imap or pop3")
+	fs.StringVar(&cmd.Protocol, "protocol", "auto", "auto, tcp (connect only), tls, smtp, ftp, imap or pop3")
 	if len(args) > 0 && args[0] == "service" {
 		args = args[1:]
 	}

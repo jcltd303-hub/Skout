@@ -1,0 +1,28 @@
+{
+  "name": "exposure20",
+  "selection_date": "2026-10-15",
+  "basis": "Heuristic review order for potential impact of exposed control, remote access, data and application services. Port numbers are hints, not confirmed products, vulnerabilities or CVSS scores.",
+  "ports": [
+    {"port": 2375, "service_hint": "Docker API", "collector_mode": "tcp"},
+    {"port": 10250, "service_hint": "Kubelet API", "collector_mode": "tls"},
+    {"port": 6443, "service_hint": "Kubernetes API", "collector_mode": "tls"},
+    {"port": 445, "service_hint": "SMB", "collector_mode": "tcp"},
+    {"port": 3389, "service_hint": "RDP", "collector_mode": "tcp"},
+    {"port": 5985, "service_hint": "WinRM HTTP", "collector_mode": "tcp"},
+    {"port": 5986, "service_hint": "WinRM HTTPS", "collector_mode": "tls"},
+    {"port": 5900, "service_hint": "VNC", "collector_mode": "tcp"},
+    {"port": 22, "service_hint": "SSH", "collector_mode": "tcp"},
+    {"port": 6379, "service_hint": "Redis", "collector_mode": "tcp"},
+    {"port": 27017, "service_hint": "MongoDB", "collector_mode": "tcp"},
+    {"port": 9200, "service_hint": "Elasticsearch HTTP or HTTPS", "collector_mode": "tcp"},
+    {"port": 1433, "service_hint": "Microsoft SQL Server", "collector_mode": "tcp"},
+    {"port": 5432, "service_hint": "PostgreSQL", "collector_mode": "tcp"},
+    {"port": 3306, "service_hint": "MySQL", "collector_mode": "tcp"},
+    {"port": 443, "service_hint": "HTTPS", "collector_mode": "tls"},
+    {"port": 8443, "service_hint": "Alternate HTTPS", "collector_mode": "tls"},
+    {"port": 80, "service_hint": "HTTP", "collector_mode": "tcp"},
+    {"port": 8080, "service_hint": "Alternate HTTP", "collector_mode": "tcp"},
+    {"port": 21, "service_hint": "FTP", "collector_mode": "ftp"}
+  ],
+  "certificate_ports": [443, 587, 21, 465, 993, 995, 8443]
+}

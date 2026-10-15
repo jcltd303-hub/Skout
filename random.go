@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/LeakIX/gopacket/routing"
+	"github.com/LeakIX/ip4scout/portprofiles"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
@@ -13,6 +14,8 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,6 +24,8 @@ type RandomCommand struct {
 	ExcludeFile        *os.File         `name:"excludefile" help:"Additional masscan-format exclusion file" type:"existingFile"`
 	SourcePort         layers.TCPPort   `help:"Source port, default is random" default:"0" short:"s"`
 	Ports              string           `help:"list of target ports" short:"p"`
+	PortProfile        string           `default:"exposure20" help:"Port profile: exposure20 or certificates; explicit --ports overrides selection"`
+	ListPorts          bool             `help:"Print selected ports and exit before network setup"`
 	RateLimit          int              `help:"Max pps" short:"r" default:"1000"`
 	DisableRecommended bool             `help:"Disable bundled masscan exclusions (private/multicast exclusions remain)" short:"d"`
 	CertificateProfile bool             `help:"Use certificate ports (443,587,21,465,993,995,8443) when --ports is omitted"`
@@ -29,21 +34,21 @@ type RandomCommand struct {
 }
 
 func (cmd *RandomCommand) Run() (err error) {
+	if err := cmd.preparePorts(); err != nil {
+		return err
+	}
+	if cmd.ListPorts {
+		ports := make([]string, len(cmd.ports))
+		for i, p := range cmd.ports {
+			ports[i] = strconv.Itoa(int(p))
+		}
+		fmt.Println(strings.Join(ports, ","))
+		return nil
+	}
 	if cmd.RateLimit < 1 {
 		return fmt.Errorf("rate-limit must be positive")
 	}
-	if cmd.CertificateProfile && cmd.Ports == "" {
-		cmd.Ports = "443,587,21,465,993,995,8443"
-	}
 	rand.Seed(time.Now().UnixNano())
-	if len(cmd.Ports) < 1 {
-		cmd.ports = append(cmd.ports, layers.TCPPort(0))
-	} else {
-		cmd.ports, err = ParsePortsList(cmd.Ports)
-		if err != nil {
-			return err
-		}
-	}
 	if cmd.SourcePort == 0 {
 		cmd.SourcePort = layers.TCPPort(rand.Int()%29000) + 1000
 	}
@@ -96,6 +101,25 @@ func (cmd *RandomCommand) Run() (err error) {
 		}
 		cmd.SendPacket(handle, iface, src, gwMac, cmd.RandomPublicIp(), portToScan)
 	}
+}
+
+func (cmd *RandomCommand) preparePorts() error {
+	ports, err := portprofiles.Ports(cmd.PortProfile)
+	if err != nil {
+		return err
+	}
+	if cmd.CertificateProfile {
+		ports, _ = portprofiles.Ports("certificates")
+	}
+	if cmd.Ports != "" {
+		cmd.ports, err = ParsePortsList(cmd.Ports)
+		return err
+	}
+	cmd.ports = make([]layers.TCPPort, len(ports))
+	for i, port := range ports {
+		cmd.ports[i] = layers.TCPPort(port)
+	}
+	return nil
 }
 
 // I just listen for SYN/ACK on port 16655 and print things

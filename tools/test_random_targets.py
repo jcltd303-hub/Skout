@@ -25,6 +25,25 @@ class RandomTargetTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(targets, "root-free random generator is missing")
 
+    def test_default_profile_emits_twenty_prioritized_endpoints_per_sample(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--count", "1"], text=True, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual([row["port"] for row in rows], [2375,10250,6443,445,3389,5985,5986,5900,22,6379,27017,9200,1433,5432,3306,443,8443,80,8080,21])
+        self.assertEqual(len({row["ip"] for row in rows}), 1)
+        self.assertFalse(targets.load_exclusions().contains(rows[0]["ip"]))
+
+    def test_profile_listing_and_explicit_ports_do_not_generate_endpoints(self):
+        for args, want in [(["--port-profile", "certificates"], "443,587,21,465,993,995,8443"),
+                           (["--ports", "443,22,443"], "443,22"),
+                           (["-p", "443,22,443"], "443,22")]:
+            result = subprocess.run([sys.executable, str(SCRIPT), *args, "--list-ports"], text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), want)
+        result = subprocess.run([sys.executable, str(SCRIPT), "--port-profile", "typo", "--count", "1"], text=True, capture_output=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
     def test_masscan_defaults_and_boundary_neighbors(self):
         excluded = targets.load_exclusions()
         for value in ("153.11.0.0", "153.11.255.255", "8.12.162.0", "8.12.164.255", "146.82.55.93", "194.77.40.242", "194.77.40.246", "205.1.2.3", "129.123.0.1", "193.60.0.1", "169.254.1.1", "198.18.0.1", "224.0.0.1", "255.255.255.255"):

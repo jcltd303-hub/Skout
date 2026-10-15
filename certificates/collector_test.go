@@ -124,6 +124,49 @@ func fastOptions() Options {
 	return o
 }
 
+func TestTCPModeConnectsWithoutApplicationBytes(t *testing.T) {
+	received := make(chan int, 1)
+	target := fixtureServer(t, func(c net.Conn) { b := make([]byte, 1); n, _ := c.Read(b); received <- n })
+	target.Mode = "tcp"
+	events, err := Collect(context.Background(), target, fastOptions())
+	if err != nil || len(events) != 1 {
+		t.Fatalf("%v %+v", err, events)
+	}
+	e := events[0]
+	if e.Error != "" || !e.TCPConnected || e.SSL.Enabled || e.Protocol != "tcp" || len(e.Transports) != 1 || e.Transports[0] != "tcp" {
+		t.Fatalf("TCP reachability mislabeled: %+v", e)
+	}
+	if n := <-received; n != 0 {
+		t.Fatalf("connect-only mode sent %d application bytes", n)
+	}
+}
+
+func TestTLSFailureRetainsTCPReachability(t *testing.T) {
+	target := fixtureServer(t, func(c net.Conn) { _, _ = c.Write([]byte("not TLS\r\n")) })
+	target.Mode = "tls"
+	events, err := Collect(context.Background(), target, fastOptions())
+	if err != nil || len(events) != 1 || !events[0].TCPConnected || events[0].Error == "" || events[0].SSL.Enabled {
+		t.Fatalf("lost TCP evidence on TLS failure: %+v (%v)", events, err)
+	}
+}
+
+func TestAutoExposureModesAndExplicitOverride(t *testing.T) {
+	for port, mode := range map[int]string{2375: "tcp", 22: "tcp", 3389: "tcp", 9200: "tcp", 443: "tls", 5986: "tls", 10250: "tls", 21: "ftp", 587: "smtp", 143: "imap", 110: "pop3"} {
+		if got := protocolFor(Target{Port: port}, fastOptions()); got != mode {
+			t.Fatalf("port %d: got %s, want %s", port, got, mode)
+		}
+	}
+	o := fastOptions()
+	o.Protocol = "tls"
+	if got := protocolFor(Target{Port: 22, Mode: "tcp"}, o); got != "tls" {
+		t.Fatal("explicit override ignored")
+	}
+	target, err := ParseTarget([]byte(`{"ip":"127.0.0.1","port":2375,"protocol":"tcp"}`))
+	if err != nil || target.Mode != "tcp" {
+		t.Fatalf("TCP endpoint mode lost: %+v %v", target, err)
+	}
+}
+
 func TestCollectTLSAndFourUpgradeProtocols(t *testing.T) {
 	for _, mode := range []string{"tls", "smtp", "ftp", "imap", "pop3"} {
 		t.Run(mode, func(t *testing.T) {

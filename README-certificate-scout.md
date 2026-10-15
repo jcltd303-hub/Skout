@@ -41,7 +41,7 @@ pkg install -y git golang python
 CGO_ENABLED=0 go build -o certscout ./cmd/certscout
 mkdir -p results
 set -o pipefail
-python3 -u tools/random_targets.py --count 1000 --ports 443,587,21 \
+python3 -u tools/random_targets.py --count 100 --port-profile exposure20 \
   | ./certscout service --max-threads=100 --rate-limit=20 --timeout=5s \
       --retries=1 --sni-limit=2 \
   | tee -a results/services.jsonl \
@@ -103,8 +103,11 @@ With the rebuilt ip4scout, the integrated equivalent is:
   | tee services.jsonl
 ```
 
-The opt-in profile covers 443,587,21,465,993,995,8443. Explicit `-p` ports take
-precedence. Existing blacklist behavior and `random -p ... -r ...` remain.
+The certificate profile covers 443,587,21,465,993,995,8443. The new default
+`--port-profile exposure20` selects [20 service ports](docs/port-profile.md).
+Explicit `-p` ports take precedence. `--certificate-profile` remains an alias
+for selecting the certificate profile. Use `random --list-ports` to inspect
+the effective selection before network setup.
 
 ## Collector behavior
 
@@ -114,9 +117,14 @@ precedence. Existing blacklist behavior and `random -p ... -r ...` remain.
 | 21 | FTP greeting, AUTH TLS, positive readiness reply |
 | 143 | IMAP greeting, tagged STARTTLS, tagged OK reply |
 | 110 | POP3 greeting, STLS, +OK reply |
-| Other ports | Direct TLS handshake |
+| Exposure-profile ports marked `tcp` | TCP connect/close only; no application bytes or TLS assessment |
+| Other ports, including the profile's five TLS ports | Direct TLS handshake |
 
-Use `--protocol=smtp` (or ftp/imap/pop3/tls) for a service on a nonstandard port.
+Use `--protocol=smtp` (or ftp/imap/pop3/tls/tcp) to override port hints. A supplied
+endpoint's `protocol` can also select these modes. `tcp` never implies plaintext:
+it means only reachability was checked. RDP, SMB and database-specific TLS
+negotiations are not implemented; TLS configured on a port normally checked by
+TCP requires an explicit TLS override.
 Input is newline-delimited l9format endpoint JSON, for example:
 
 ```json
@@ -150,7 +158,7 @@ only if capture capacity and the downstream collector can support it.
 The worker queue and endpoint/SNI cache are bounded. A slow downstream writer
 applies backpressure to the collector. It cannot make the separate raw SYN
 sender wait for TLS work or guarantee that high-rate packet capture is lossless.
-Use the final stderr summary's per-port certificate/error counts to tune rates
+Use the final stderr summary's per-port TCP-connected/certificate/error counts to tune rates
 and port selection; more SYN packets do not by themselves prove better yield.
 
 Defaults: 100 workers, 200 queued endpoints, 50 connection starts/second, 8s total

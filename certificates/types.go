@@ -1,4 +1,4 @@
-// Package certificates collects TLS certificate evidence without application fuzzing.
+// Package certificates collects TCP reachability and TLS certificate evidence.
 package certificates
 
 import (
@@ -43,7 +43,7 @@ func ParseTarget(line []byte) (Target, error) {
 	}
 	target := Target{IP: raw.IP, Port: port, Host: raw.Host}
 	switch raw.Protocol {
-	case "smtp", "ftp", "imap", "pop3":
+	case "tcp", "tls", "smtp", "ftp", "imap", "pop3":
 		target.Mode = raw.Protocol
 	}
 	return target.normalized()
@@ -73,14 +73,14 @@ func (t Target) normalized() (Target, error) {
 
 func validMode(mode string) bool {
 	switch mode {
-	case "", "auto", "tls", "smtp", "ftp", "imap", "pop3":
+	case "", "auto", "tcp", "tls", "smtp", "ftp", "imap", "pop3":
 		return true
 	}
 	return false
 }
 
 type Options struct {
-	MaxThreads    int           `default:"100" help:"Maximum concurrent certificate workers"`
+	MaxThreads    int           `default:"100" help:"Maximum concurrent service workers"`
 	QueueSize     int           `default:"200" help:"Maximum queued endpoints"`
 	RateLimit     int           `default:"50" help:"Global TCP connection starts per second (includes retries and SNI)"`
 	Timeout       time.Duration `default:"8s" help:"Total deadline per connection attempt"`
@@ -88,7 +88,7 @@ type Options struct {
 	SNILimit      int           `default:"0" name:"sni-limit" help:"Maximum same-endpoint follow-ups using concrete certificate SANs"`
 	DedupCapacity int           `default:"100000" help:"Maximum cached endpoint/SNI keys"`
 	DedupTTL      time.Duration `default:"1h" help:"Endpoint duplicate suppression window"`
-	Protocol      string        `default:"auto" help:"auto, tls, smtp, ftp, imap or pop3; overrides port detection"`
+	Protocol      string        `default:"auto" help:"auto, tcp (connect only), tls, smtp, ftp, imap or pop3; overrides port hints"`
 	limiter       *startLimiter
 	seen          *seenCache
 }
@@ -116,7 +116,7 @@ func (o Options) Validate() error {
 	case o.DedupTTL <= 0:
 		return fmt.Errorf("dedup-ttl must be positive")
 	case !validMode(o.Protocol):
-		return fmt.Errorf("protocol must be auto, tls, smtp, ftp, imap or pop3")
+		return fmt.Errorf("protocol must be auto, tcp, tls, smtp, ftp, imap or pop3")
 	}
 	return nil
 }
@@ -144,17 +144,20 @@ type SSL struct {
 }
 
 type Event struct {
-	EventType   string    `json:"event_type"`
-	EventSource string    `json:"event_source"`
-	IP          string    `json:"ip"`
-	Port        string    `json:"port"`
-	Host        string    `json:"host,omitempty"`
-	Protocol    string    `json:"protocol"`
-	Transports  []string  `json:"transport,omitempty"`
-	Time        time.Time `json:"time"`
-	SSL         SSL       `json:"ssl"`
-	Attempts    int       `json:"attempts"`
-	Error       string    `json:"error,omitempty"`
-	ErrorKind   string    `json:"error_kind,omitempty"`
-	InputLine   int       `json:"input_line,omitempty"`
+	EventType       string    `json:"event_type"`
+	EventSource     string    `json:"event_source"`
+	IP              string    `json:"ip"`
+	Port            string    `json:"port"`
+	Host            string    `json:"host,omitempty"`
+	Protocol        string    `json:"protocol"`
+	TCPConnected    bool      `json:"tcp_connected,omitempty"`
+	ServiceHint     string    `json:"service_hint,omitempty"`
+	PortReviewOrder int       `json:"port_review_order,omitempty"`
+	Transports      []string  `json:"transport,omitempty"`
+	Time            time.Time `json:"time"`
+	SSL             SSL       `json:"ssl"`
+	Attempts        int       `json:"attempts"`
+	Error           string    `json:"error,omitempty"`
+	ErrorKind       string    `json:"error_kind,omitempty"`
+	InputLine       int       `json:"input_line,omitempty"`
 }

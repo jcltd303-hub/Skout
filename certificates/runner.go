@@ -79,6 +79,7 @@ func (c *seenCache) Seen(key string, now time.Time) bool {
 
 type PortStats struct {
 	Outcomes     int `json:"outcomes"`
+	TCPConnected int `json:"tcp_connected"`
 	Certificates int `json:"certificates"`
 	Errors       int `json:"errors"`
 }
@@ -87,6 +88,7 @@ type Stats struct {
 	Accepted     int                   `json:"accepted"`
 	Duplicates   int                   `json:"duplicates"`
 	InputErrors  int                   `json:"input_errors"`
+	TCPConnected int                   `json:"tcp_connected"`
 	Certificates int                   `json:"certificates"`
 	Errors       int                   `json:"errors"`
 	Ports        map[string]*PortStats `json:"ports"`
@@ -189,10 +191,15 @@ func Run(parent context.Context, input io.Reader, output io.Writer, o Options) (
 			stats.Ports[event.Port] = port
 		}
 		port.Outcomes++
+		if event.TCPConnected {
+			stats.TCPConnected++
+			port.TCPConnected++
+		}
 		if event.SSL.Enabled {
 			stats.Certificates++
 			port.Certificates++
-		} else {
+		}
+		if event.Error != "" {
 			stats.Errors++
 			port.Errors++
 		}

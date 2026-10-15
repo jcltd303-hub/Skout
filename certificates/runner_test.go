@@ -8,10 +8,25 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestRunnerTCPOutcomesAreNotCertificateErrors(t *testing.T) {
+	target := fixtureServer(t, func(c net.Conn) { _, _ = io.Copy(io.Discard, c) })
+	line := fmt.Sprintf(`{"ip":%q,"port":%d,"protocol":"tcp"}`, target.IP, target.Port)
+	var output bytes.Buffer
+	stats, err := Run(context.Background(), strings.NewReader(line+"\n"+line+"\n"), &output, fastOptions())
+	if err != nil || stats.TCPConnected != 1 || stats.Certificates != 0 || stats.Errors != 0 || stats.Duplicates != 1 {
+		t.Fatalf("TCP-only outcomes counted as failures: %+v (%v)", stats, err)
+	}
+	port := stats.Ports[fmt.Sprint(target.Port)]
+	if port == nil || port.TCPConnected != 1 || port.Errors != 0 {
+		t.Fatalf("bad per-port stats: %+v", port)
+	}
+}
 
 func TestRunnerDeduplicatesAndPreservesMalformedInputOutcome(t *testing.T) {
 	target := fixtureTLS(t, "tls", &tls.Config{Certificates: []tls.Certificate{testCertificate(t, "runner.example.test", "runner.example.test")}})

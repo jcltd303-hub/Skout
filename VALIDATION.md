@@ -1,5 +1,32 @@
 # Delivered validation
 
+## Exposure20 default profile update
+
+Both endpoint generators now default to the same 20-port selection. Its JSON
+source is embedded into Go and read by Python. Explicit ports and the previous
+seven-port certificate profile remain available. Profile order is a review
+heuristic based on potential exposure impact, not CVSS or a measured exploit
+probability. Port-derived service names remain unverified hints.
+
+All 43 Python tests and the full Go race suite passed. New regressions cover
+the shared port selection and collector modes, native flags, explicit overrides,
+cross-language parity, TCP-only connections sending zero application bytes,
+retained TCP evidence on TLS failure, and per-port statistics that do not count
+successful TCP-only outcomes as certificate errors. `go vet ./...`, native Linux
+builds and the Android ARM64 standalone collector cross-build passed.
+
+The first full race run hit `TestCLIBlockedOutputCancellation/second_interrupt`'s
+one-second wall-clock assertion. Five isolated repetitions passed (about 0.22s
+per second-interrupt subtest), followed by a passing fresh full race suite.
+Cancellation code and its deadline were not changed; the initial timing failure
+was not reproduced.
+
+Native default/certificate/override `--list-ports` commands were exercised at
+rate zero, exiting before network setup. A standalone CLI smoke test connected
+only to a loopback fixture, emitted a successful TCP outcome, sent zero application
+bytes and reported one TCP connection with zero certificates/errors. There were
+no live Internet scans. Android execution remains untested on a phone.
+
 ## Vulnerability prioritization update
 
 The Python prioritizer ranks supplied CVE findings, defaulting to 20 unique CVEs

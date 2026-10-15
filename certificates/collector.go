@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/LeakIX/ip4scout/portprofiles"
 )
 
 func protocolFor(t Target, o Options) string {
@@ -31,6 +33,9 @@ func protocolFor(t Target, o Options) string {
 		return "imap"
 	case 110:
 		return "pop3"
+	}
+	if hint, ok := portprofiles.Lookup(t.Port); ok {
+		return hint.Mode
 	}
 	return "tls"
 }
@@ -86,6 +91,9 @@ func Collect(ctx context.Context, target Target, o Options) ([]Event, error) {
 func collectOne(ctx context.Context, target Target, o Options) Event {
 	mode := protocolFor(target, o)
 	event := Event{EventType: "service", EventSource: "ip4scout/certs", IP: target.IP, Port: strconv.Itoa(target.Port), Host: target.Host, Protocol: mode, Time: time.Now().UTC()}
+	if hint, ok := portprofiles.Lookup(target.Port); ok {
+		event.ServiceHint, event.PortReviewOrder = hint.ServiceHint, hint.ReviewOrder
+	}
 	var err error
 	for attempt := 0; attempt <= o.Retries; attempt++ {
 		if err = o.limiter.Wait(ctx); err != nil {
@@ -93,8 +101,16 @@ func collectOne(ctx context.Context, target Target, o Options) Event {
 		}
 		event.Attempts++
 		var state tls.ConnectionState
-		state, err = handshake(ctx, target, mode, o.Timeout)
+		var connected bool
+		state, connected, err = handshake(ctx, target, mode, o.Timeout)
+		if connected {
+			event.TCPConnected = true
+			event.Transports = []string{"tcp"}
+		}
 		if err == nil {
+			if mode == "tcp" {
+				return event
+			}
 			if len(state.PeerCertificates) == 0 {
 				err = errors.New("TLS peer provided no certificate")
 				break
@@ -141,19 +157,22 @@ type bufferedConn struct {
 
 func (c *bufferedConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
 
-func handshake(parent context.Context, target Target, mode string, timeout time.Duration) (tls.ConnectionState, error) {
+func handshake(parent context.Context, target Target, mode string, timeout time.Duration) (tls.ConnectionState, bool, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(target.IP, strconv.Itoa(target.Port)))
 	if err != nil {
-		return tls.ConnectionState{}, err
+		return tls.ConnectionState{}, false, err
 	}
 	defer conn.Close()
+	if mode == "tcp" {
+		return tls.ConnectionState{}, true, nil
+	}
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 	deadline, _ := ctx.Deadline()
 	if err = conn.SetDeadline(deadline); err != nil {
-		return tls.ConnectionState{}, err
+		return tls.ConnectionState{}, true, err
 	}
 	transport := conn
 	if mode != "tls" {
@@ -162,16 +181,16 @@ func handshake(parent context.Context, target Target, mode string, timeout time.
 			if ctx.Err() != nil {
 				err = ctx.Err()
 			}
-			return tls.ConnectionState{}, err
+			return tls.ConnectionState{}, true, err
 		}
 		transport = &bufferedConn{Conn: conn, reader: reader}
 	}
 	// Observation mode accepts self-signed/expired certificates and explicitly does not assess trust.
 	tc := tls.Client(transport, &tls.Config{ServerName: target.Host, InsecureSkipVerify: true, MinVersion: tls.VersionTLS10})
 	if err = tc.HandshakeContext(ctx); err != nil {
-		return tls.ConnectionState{}, err
+		return tls.ConnectionState{}, true, err
 	}
-	return tc.ConnectionState(), nil
+	return tc.ConnectionState(), true, nil
 }
 
 type replyReader struct {

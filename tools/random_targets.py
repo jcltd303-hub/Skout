@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit random IPv4 endpoint JSON while honoring the bundled masscan exclusions."""
+"""Emit random IPv4 endpoint JSON with shared port profiles and masscan exclusions."""
 
 import argparse
 import bisect
@@ -12,6 +12,7 @@ import sys
 
 
 DEFAULT_EXCLUSIONS = Path(__file__).resolve().parents[1] / "data" / "masscan-exclude.conf"
+PORT_PROFILE = Path(__file__).resolve().parents[1] / "portprofiles" / "exposure20.json"
 # Match the native scanner's mandatory exclusions, including multicast/reserved.
 MANDATORY_EXCLUSIONS = """0.0.0.0/8
 10.0.0.0/8
@@ -102,6 +103,21 @@ def load_exclusions(extra_files=()):
     return exclusions
 
 
+def profile_ports(name):
+    doc = json.loads(PORT_PROFILE.read_text(encoding="utf-8"))
+    if name == "exposure20":
+        values = [row["port"] for row in doc["ports"]]
+        if len(values) != 20 or len(set(values)) != 20:
+            raise ValueError("exposure20 must contain 20 unique ports")
+    elif name == "certificates":
+        values = doc["certificate_ports"]
+    else:
+        raise ValueError("unknown port profile; use exposure20 or certificates")
+    if not values or any(type(port) is not int or not 1 <= port <= 65535 for port in values):
+        raise ValueError("invalid bundled port profile")
+    return tuple(values)
+
+
 def parse_ports(text):
     ports = []
     for part in text.split(","):
@@ -131,13 +147,18 @@ def generate_targets(count, ports, exclusions, rng=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--count", type=int, default=1000, help="Number of IPv4 samples; one endpoint per port per sample")
-    parser.add_argument("--ports", default="443,587,21", help="Comma-separated ports (default: 443,587,21)")
+    parser.add_argument("--ports", "-p", help="Comma-separated ports; overrides --port-profile")
+    parser.add_argument("--port-profile", choices=("exposure20", "certificates"), default="exposure20", help="Default: exposure20; certificates selects the original TLS/upgrade profile")
+    parser.add_argument("--list-ports", action="store_true", help="Print selected ports and exit without generating endpoints")
     parser.add_argument("--excludefile", "-b", type=Path, action="append", default=[], help="Additional masscan-format exclusion file; may be repeated")
     args = parser.parse_args(argv)
     try:
         if args.count < 0:
             raise ValueError("count must be nonnegative")
-        ports = parse_ports(args.ports)
+        ports = parse_ports(args.ports) if args.ports is not None else profile_ports(args.port_profile)
+        if args.list_ports:
+            print(",".join(map(str, ports)))
+            return 0
         exclusions = load_exclusions(args.excludefile)
     except (OSError, ValueError) as error:
         parser.error(str(error))

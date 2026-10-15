@@ -1,8 +1,8 @@
 # Skout
 
-Certificate-focused network discovery built on [LeakIX/ip4scout](https://github.com/LeakIX/ip4scout).
-Collect TLS certificate names with endpoint evidence, normalize SANs and common
-names, suppress repeated probes, and retain discoveries in SQLite.
+Port exposure and certificate discovery built on [LeakIX/ip4scout](https://github.com/LeakIX/ip4scout).
+Discover a shared 20-port service profile, record TCP reachability, collect TLS
+certificate names where supported, and retain certificate evidence in SQLite.
 
 The standalone collector uses ordinary TCP connections and needs no libpcap or
 raw-socket privileges. The original SYN scanner remains available for endpoint
@@ -21,7 +21,7 @@ on the phone. Generate random endpoint JSON without root or packet capture:
 
 ```bash
 set -o pipefail
-python3 -u tools/random_targets.py --count 1000 --ports 443,587,21 \
+python3 -u tools/random_targets.py --count 100 --port-profile exposure20 \
   | ./certscout service --max-threads=100 --rate-limit=20 --timeout=5s \
       --retries=1 --sni-limit=2 \
   | tee -a services.jsonl \
@@ -41,8 +41,24 @@ generator (`-b` also works). Single IPs, CIDRs, inclusive IP ranges and `#`
 comments are accepted. Missing/invalid files and fully excluded target spaces
 stop generation. The collector still accepts explicitly supplied endpoints.
 
+Both generators now default to **exposure20** when ports are omitted. The
+[profile and rationale](docs/port-profile.md) cover container/Kubernetes APIs,
+remote access, databases and web services. Inspect the selection without starting
+discovery using `python3 tools/random_targets.py --list-ports` or
+`./ip4scout random --list-ports`. Explicit `--ports`/`-p` overrides it; select
+`--port-profile certificates` for the previous seven-port certificate profile.
+One Python sample generates 20 endpoints, so `--count 100` produces 2,000 rows.
+
+Rebuild `certscout` after updating: its new TCP-only mode records reachability on
+other service ports without sending application data. Results include `tcp_connected`,
+unverified `service_hint` and heuristic `port_review_order`. A reachable port
+does not establish an affected product, missing authentication or CVE severity.
+The existing masscan exclusions, worker bounds and global rate cap also apply.
+
 ## Included
 
+- A shared default 20-port exposure profile with inspectable port selection.
+- TCP-only reachability outcomes for services without a supported TLS exchange.
 - Direct TLS plus SMTP STARTTLS, FTP AUTH TLS, IMAP STARTTLS and POP3 STLS.
 - Masscan exclusion data shared by native and root-free random target generators.
 - SAN and common-name collection, preserved wildcard patterns and certificate metadata.
