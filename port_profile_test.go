@@ -36,6 +36,6 @@ func TestNativeProfileDefaultsAndExplicitOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !app.Random.ListPorts || app.Random.PortProfile != "certificates" {
-		t.Fatalf("flags not wired: %+v", app.Random)
+		t.Fatalf("flags not wired: listPorts=%v profile=%q", app.Random.ListPorts, app.Random.PortProfile)
 	}
 }

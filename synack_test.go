@@ -1,6 +1,7 @@
 package ip4scout
 
 import (
+	"context"
 	"encoding/json"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -68,7 +69,7 @@ func TestListenerDoesNotEmitExcludedEndpoints(t *testing.T) {
 	os.Stdout = output
 	defer func() { os.Stdout = original }()
 	cmd := RandomCommand{SourcePort: 16655}
-	cmd.ListenForAck(handle)
+	cmd.ListenForAck(handle, context.Background(), make(chan error, 1))
 	if _, err := output.Seek(0, io.SeekStart); err != nil {
 		t.Fatal(err)
 	}
