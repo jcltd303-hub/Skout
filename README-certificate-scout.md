@@ -25,6 +25,47 @@ go build -o ip4scout ./cmd/ip4scout
 The old l9format v1.0.0 dependency referenced an unavailable socksme host. This
 refactor uses l9format v1.3.1, which removes that dependency, and updates go.sum.
 
+## Random targets and masscan exclusions
+
+Both `ip4scout random` and `tools/random_targets.py` use the same bundled
+[masscan exclusion snapshot](data/MASSCAN.md): all 332 active IPv4 entries from
+the pinned upstream `data/exclude.conf`. It includes CIDRs, individual IPs and
+inclusive ranges. Mandatory private, loopback, multicast and reserved-space
+exclusions are also retained. The previous recommended/CDN policy is replaced
+by this masscan snapshot. The list is local and is not downloaded during scans.
+
+For unrooted Termux, use the root-free generator with the standalone collector:
+
+```bash
+pkg install -y git golang python
+CGO_ENABLED=0 go build -o certscout ./cmd/certscout
+mkdir -p results
+set -o pipefail
+python3 -u tools/random_targets.py --count 1000 --ports 443,587,21 \
+  | ./certscout service --max-threads=100 --rate-limit=20 --timeout=5s \
+      --retries=1 --sni-limit=2 \
+  | tee -a results/services.jsonl \
+  | python3 tools/export_domains.py \
+      --database results/scout.sqlite --domains results/domains.txt \
+      --evidence results/evidence.jsonl --stream
+```
+
+`--count` is the number of IP samples, with one endpoint emitted for each listed
+port. Samples may repeat; collector/SQLite deduplication still applies. The
+generator emits JSON only and makes no connections itself. Its pipe is bounded
+by the downstream collector's queue and connection rate.
+
+Add custom exclusions with `--excludefile extra.conf` or `-b extra.conf` on
+either generator. Python accepts repeated files; native `--blacklist-file`
+also accepts an additional file. When both native spellings are supplied,
+their exclusions are combined. Files contain one IPv4
+address, CIDR, or inclusive `first-last` range per line; blank lines and `#`
+comments are accepted. Invalid/unreadable files and lists excluding every IPv4
+address fail before target output or network setup. The native scanner embeds
+the defaults, so rebuild it after updating the list. Its existing `-d` flag
+disables the masscan snapshot while retaining mandatory exclusions. Explicit
+endpoint input to the certificate collector remains caller-selected.
+
 ## Replace the certificate stage in your pipeline
 
 Your existing `ip4scout` binary can feed the standalone collector immediately:

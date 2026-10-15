@@ -79,3 +79,30 @@ preserving both CLI commands.
   be measured on the actual scan host and input population.
 
 No review findings remain deferred.
+
+## Masscan blacklist update
+
+The pinned masscan snapshot contains all 332 active entries from upstream commit
+`8e6b3b0c07a81e8ea61d557c06134a21a6881614`; its active-entry SHA-256 is checked
+by a regression test. The native scanner and root-free Python generator use
+the same data. A cross-language test compares every merged exclusion interval
+and the complete remaining-address count.
+
+The new regressions cover inclusive range/CIDR/single-IP boundaries, comments,
+host-bit masking, IPv4 arithmetic at zero and the maximum address, additive
+custom files, isolated command state, missing/invalid/unreadable files, and
+fully excluded target spaces. An offline PCAP fixture verifies that excluded
+SYN/ACK replies are not emitted as collector endpoints. Native exclusion flag
+spellings were exercised with rate zero, before network setup. The root-free CLI
+was exercised from a different working directory and sampled a two-IP remainder
+without rejection loops.
+
+`go test -race ./... -count=1 -timeout=120s`, `go vet ./...`, all 18 Python tests,
+native Linux builds and the standalone Android ARM64 cross-build passed.
+Android execution was not tested on a phone. No live scanning was performed.
+
+Independent review found no blocking issues. Its one minor finding, Python
+accepting CIDR prefix lengths with leading zeros while Go rejected them, was
+reproduced by a failing test and corrected. Both parsers now reject those
+noncanonical custom entries. The reviewer independently passed the root Go
+race tests, all Python tests and 500 randomized interval/rank oracle checks.

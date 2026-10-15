@@ -1,7 +1,6 @@
 package ip4scout
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"github.com/LeakIX/gopacket/routing"
@@ -18,13 +17,15 @@ import (
 )
 
 type RandomCommand struct {
-	BlacklistFile      *os.File         `help:"Blacklist file, in CIDR form" short:"b" type:"existingFile"`
+	BlacklistFile      *os.File         `help:"Additional exclusions: IPv4, CIDR, or inclusive IPv4 ranges" short:"b" type:"existingFile"`
+	ExcludeFile        *os.File         `name:"excludefile" help:"Additional masscan-format exclusion file" type:"existingFile"`
 	SourcePort         layers.TCPPort   `help:"Source port, default is random" default:"0" short:"s"`
 	Ports              string           `help:"list of target ports" short:"p"`
 	RateLimit          int              `help:"Max pps" short:"r" default:"1000"`
-	DisableRecommended bool             `help:"Disable the recommended blacklist" short:"d"`
+	DisableRecommended bool             `help:"Disable bundled masscan exclusions (private/multicast exclusions remain)" short:"d"`
 	CertificateProfile bool             `help:"Use certificate ports (443,587,21,465,993,995,8443) when --ports is omitted"`
 	ports              []layers.TCPPort `kong:"-"`
+	exclusions         *exclusionSet    `kong:"-"`
 }
 
 func (cmd *RandomCommand) Run() (err error) {
@@ -46,27 +47,15 @@ func (cmd *RandomCommand) Run() (err error) {
 	if cmd.SourcePort == 0 {
 		cmd.SourcePort = layers.TCPPort(rand.Int()%29000) + 1000
 	}
-	if !cmd.DisableRecommended {
-		IPBlacklist = append(IPBlacklist, recommendedBlacklist...)
-		cmd.AddBLockToBlacklist("23.192.0.0/11")
-		cmd.AddBLockToBlacklist("23.32.0.0/11")
-		cmd.AddBLockToBlacklist("23.64.0.0/14")
-		cmd.AddBLockToBlacklist("23.0.0.0/12")
-		cmd.AddBLockToBlacklist("104.64.0.0/10")
-		cmd.AddBLockToBlacklist("2.21.112.0/20")
-		cmd.AddBLockToBlacklist("104.16.0.0/12")
-		cmd.AddBLockToBlacklist("198.41.128.0/17")
-		cmd.AddBLockToBlacklist("184.24.0.0/13")
-		log.Printf("Recommended blacklist loaded")
+	if err := cmd.prepareBlacklist(); err != nil {
+		return err
 	}
-	if cmd.BlacklistFile != nil {
-		blacklistFileScanner := bufio.NewScanner(cmd.BlacklistFile)
-		for blacklistFileScanner.Scan() {
-			cmd.AddBLockToBlacklist(blacklistFileScanner.Text())
+	for _, file := range []*os.File{cmd.BlacklistFile, cmd.ExcludeFile} {
+		if file != nil {
+			log.Printf("Loaded blacklist from %s", file.Name())
 		}
-		log.Printf("Loaded blacklist from %s", cmd.BlacklistFile.Name())
 	}
-	log.Printf("%d networks in blacklist", len(IPBlacklist))
+	log.Printf("%d merged exclusion ranges loaded (masscan default: %t)", len(cmd.exclusions.ranges), !cmd.DisableRecommended)
 	log.Printf("Loaded %d ports to scan", len(cmd.ports))
 	log.Printf("Using source port %d", cmd.SourcePort)
 	// Compute routing settings for public packets
@@ -115,7 +104,7 @@ func (cmd *RandomCommand) ListenForAck(handle *pcap.Handle) {
 	log.Println("Listening!")
 	jsonEncoder := json.NewEncoder(os.Stdout)
 	for packet := range packetSource.Packets() {
-		if event := synAckEvent(packet, cmd.SourcePort); event != nil {
+		if event := synAckEvent(packet, cmd.SourcePort); event != nil && cmd.IsIpPublic(net.ParseIP(event.Ip)) {
 			err := jsonEncoder.Encode(event)
 			if err != nil {
 				panic(err)
@@ -125,15 +114,13 @@ func (cmd *RandomCommand) ListenForAck(handle *pcap.Handle) {
 }
 
 func (cmd *RandomCommand) RandomPublicIp() net.IP {
-	var ip net.IP
-	token := make([]byte, 4)
-	for {
-		rand.Read(token)
-		ip = net.IPv4(token[0], token[1], token[2], token[3])
-		if cmd.IsIpPublic(ip) {
-			return ip
+	if cmd.exclusions == nil {
+		if err := cmd.prepareBlacklist(); err != nil {
+			panic(err)
 		}
 	}
+	rank := uint64(rand.Int63n(int64(cmd.exclusions.available)))
+	return cmd.exclusions.addressAt(rank)
 }
 
 func (cmd *RandomCommand) AddBLockToBlacklist(network string) {
@@ -145,10 +132,19 @@ func (cmd *RandomCommand) AddBLockToBlacklist(network string) {
 }
 
 func (cmd *RandomCommand) IsIpPublic(ip net.IP) bool {
+	if ip.To4() == nil {
+		return false
+	}
 	for _, block := range IPBlacklist {
-		if block.Contains(ip) {
+		if block != nil && block.Contains(ip) {
 			return false
 		}
+	}
+	if cmd.exclusions != nil {
+		return !cmd.exclusions.contains(ip)
+	}
+	if !cmd.DisableRecommended {
+		return masscanExclusionError == nil && !masscanExclusions.contains(ip)
 	}
 	return true
 }
@@ -219,65 +215,5 @@ var IPBlacklist = []*net.IPNet{
 	{
 		IP:   net.IP{224, 0, 0, 0},
 		Mask: net.IPMask{224, 0, 0, 0},
-	},
-}
-
-var recommendedBlacklist = []*net.IPNet{
-	// List of easily pissed off people
-	{
-		IP:   net.IP{148, 59, 85, 0},
-		Mask: net.IPMask{255, 255, 255, 0},
-	},
-	{
-		IP:   net.IP{6, 0, 0, 0},
-		Mask: net.IPMask{255, 0, 0, 0},
-	},
-	{
-		IP:   net.IP{7, 0, 0, 0},
-		Mask: net.IPMask{255, 0, 0, 0},
-	},
-	{
-		IP:   net.IP{11, 0, 0, 0},
-		Mask: net.IPMask{255, 0, 0, 0},
-	},
-	{
-		IP:   net.IP{21, 0, 0, 0},
-		Mask: net.IPMask{255, 0, 0, 0},
-	},
-	{
-		IP:   net.IP{22, 0, 0, 0},
-		Mask: net.IPMask{255, 0, 0, 0},
-	},
-	{
-		IP:   net.IP{26, 0, 0, 0},
-		Mask: net.IPMask{255, 0, 0, 0},
-	},
-	{
-		IP:   net.IP{28, 0, 0, 0},
-		Mask: net.IPMask{255, 0, 0, 0},
-	},
-	{
-		IP:   net.IP{29, 0, 0, 0},
-		Mask: net.IPMask{255, 0, 0, 0},
-	},
-	{
-		IP:   net.IP{30, 0, 0, 0},
-		Mask: net.IPMask{255, 0, 0, 0},
-	},
-	{
-		IP:   net.IP{33, 0, 0, 0},
-		Mask: net.IPMask{255, 0, 0, 0},
-	},
-	{
-		IP:   net.IP{55, 0, 0, 0},
-		Mask: net.IPMask{255, 0, 0, 0},
-	},
-	{
-		IP:   net.IP{214, 0, 0, 0},
-		Mask: net.IPMask{255, 0, 0, 0},
-	},
-	{
-		IP:   net.IP{215, 0, 0, 0},
-		Mask: net.IPMask{255, 0, 0, 0},
 	},
 }

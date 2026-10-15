@@ -34,13 +34,16 @@ jobs:
         run: |
           go test -race ./... -count=1 -timeout=120s
           go vet ./...
-      - name: Verify certificate exporter
+      - name: Verify Python tools
         run: python3 -m unittest discover -s tools -p 'test_*.py' -v
       - name: Build Linux executables
         run: |
           mkdir -p bin
           CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o bin/certscout-linux-amd64 ./cmd/certscout
           go build -trimpath -ldflags='-s -w' -o bin/ip4scout-linux-amd64 ./cmd/ip4scout
+          cp LICENSE bin/LICENSE
+          mkdir -p bin/data
+          cp data/masscan-exclude.conf data/MASSCAN.md data/MASSCAN-LICENSE bin/data/
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: skout-linux-amd64

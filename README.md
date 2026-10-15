@@ -13,16 +13,18 @@ discovery, with its existing platform requirements.
 Requires Go 1.22+ and Python 3.9+.
 
 ```bash
-go build -o certscout ./cmd/certscout
+CGO_ENABLED=0 go build -o certscout ./cmd/certscout
 ```
 
-Feed it endpoint JSON from your existing ip4scout binary:
+On Termux, install dependencies with `pkg install git golang python`, then build
+on the phone. Generate random endpoint JSON without root or packet capture:
 
 ```bash
 set -o pipefail
-./ip4scout random -r 1000 -p 443,587,21 \
-  | ./certscout service --max-threads=100 --rate-limit=50 --timeout=8s \
-  | tee services.jsonl \
+python3 -u tools/random_targets.py --count 1000 --ports 443,587,21 \
+  | ./certscout service --max-threads=100 --rate-limit=20 --timeout=5s \
+      --retries=1 --sni-limit=2 \
+  | tee -a services.jsonl \
   | python3 tools/export_domains.py \
       --database scout.sqlite --domains domains.txt \
       --evidence evidence.jsonl --stream
@@ -31,9 +33,18 @@ set -o pipefail
 To build the integrated scanner and `certs` command, install libpcap development
 headers/libraries and run `go build -o ip4scout ./cmd/ip4scout`.
 
+Both `tools/random_targets.py` and the rebuilt `ip4scout random` use the same
+bundled [masscan exclusions](data/MASSCAN.md) by default: all 332 active entries
+from the pinned upstream file, plus mandatory nonpublic/multicast exclusions.
+To add your own masscan-format file, use `--excludefile extra.conf` with either
+generator (`-b` also works). Single IPs, CIDRs, inclusive IP ranges and `#`
+comments are accepted. Missing/invalid files and fully excluded target spaces
+stop generation. The collector still accepts explicitly supplied endpoints.
+
 ## Included
 
 - Direct TLS plus SMTP STARTTLS, FTP AUTH TLS, IMAP STARTTLS and POP3 STLS.
+- Masscan exclusion data shared by native and root-free random target generators.
 - SAN and common-name collection, preserved wildcard patterns and certificate metadata.
 - Bounded worker queue, global connection-start rate cap, timeout retries and shared endpoint/SNI deduplication.
 - Optional SNI follow-ups confined to the original IP and port.
@@ -63,3 +74,6 @@ repository begins with a source snapshot; upstream history remains available in
 is retained for compatibility. Certificate names are observations
 from an endpoint; they do not establish current DNS resolution, ownership or
 certificate-chain trust.
+
+The bundled masscan exclusion data retains its [upstream license](data/MASSCAN-LICENSE)
+and [source provenance](data/MASSCAN.md).
