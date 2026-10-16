@@ -225,6 +225,7 @@ from that endpoint, not proof that the name resolves there or belongs to it.
 | `-d, --disable-recommended` | off | Disable bundled masscan exclusions (mandatory exclusions remain) |
 | `--seed` | 0 (crypto-random) | RNG seed for deterministic sampling |
 | `--count` | 0 (scan forever) | Send exactly N packets, then exit |
+| `--wait-after` | 5 | Seconds to wait after sending `--count` packets for SYN/ACK replies before exiting (`0` exits immediately) |
 | `--distinct` | on | With `--count`, resample until target IPs are distinct (`--no-distinct` disables) |
 | `--ipv6` | off | Generate IPv6 targets; raw IPv6 packet emission is not implemented, so IPv6 targets are skipped at send time with a log line |
 

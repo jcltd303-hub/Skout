@@ -1,13 +1,16 @@
 package ip4scout
 
 import (
+	"context"
 	"crypto/md5"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRandomSeedDeterminism(t *testing.T) {
@@ -142,6 +145,38 @@ func TestAddBlockToBlacklistReturnsError(t *testing.T) {
 	}
 	if cmd.IsIpPublic(net.ParseIP("203.0.113.5")) {
 		t.Fatal("added blacklist entry ignored")
+	}
+}
+
+func TestWaitForReplies(t *testing.T) {
+	// Grace period is honoured: replies arriving during the wait are not lost.
+	start := time.Now()
+	if err := waitForReplies(context.Background(), make(chan error, 1), 150*time.Millisecond); err != nil {
+		t.Fatalf("grace wait returned error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+		t.Fatalf("returned after %v, want >= 150ms", elapsed)
+	}
+	// Listener error returns immediately, without waiting out the grace.
+	want := errors.New("listener failed")
+	errCh := make(chan error, 1)
+	errCh <- want
+	if err := waitForReplies(context.Background(), errCh, 10*time.Second); !errors.Is(err, want) {
+		t.Fatalf("got %v, want %v", err, want)
+	}
+	// Cancelled context returns promptly.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := waitForReplies(ctx, make(chan error, 1), 10*time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want context.Canceled", err)
+	}
+	// Zero grace returns immediately.
+	start = time.Now()
+	if err := waitForReplies(context.Background(), make(chan error, 1), 0); err != nil {
+		t.Fatalf("zero grace returned error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("zero grace took %v, want immediate return", elapsed)
 	}
 }
 

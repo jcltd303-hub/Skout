@@ -40,6 +40,7 @@ type RandomCommand struct {
 	CertificateProfile bool             `help:"Use certificate ports (443,587,21,465,993,995,8443) when --ports is omitted"`
 	Seed               int64            `help:"RNG seed; 0 seeds from crypto/rand" default:"0"`
 	Count              int              `help:"Send exactly this many packets, then exit; 0 scans forever (legacy)" default:"0"`
+	WaitAfterSeconds   int              `help:"Seconds to wait after sending --count packets for SYN/ACK replies before exiting" name:"wait-after" default:"5"`
 	Distinct           bool             `help:"With --count, resample until all target IPs are distinct" default:"true"`
 	IPv6               bool             `name:"ipv6" help:"Generate IPv6 targets (RandomPublicIp returns v6 addresses); packet emission stays IPv4-framed, so v6 targets are skipped at send time" default:"false"`
 	ports              []layers.TCPPort `kong:"-"`
@@ -74,6 +75,9 @@ func (cmd *RandomCommand) RunContext(ctx context.Context) error {
 	if cmd.Count < 0 {
 		return fmt.Errorf("count must be non-negative")
 	}
+	if cmd.WaitAfterSeconds < 0 {
+		return fmt.Errorf("wait-after must be non-negative")
+	}
 	if len(cmd.ports) == 0 {
 		return fmt.Errorf("no ports to scan")
 	}
@@ -105,7 +109,7 @@ func (cmd *RandomCommand) RunContext(ctx context.Context) error {
 	// Open main interface handle for packets r/w
 	handle, err := pcap.OpenLive(iface.Name, 1024*256, true, 100*time.Nanosecond)
 	if err != nil {
-		return err
+		return fmt.Errorf("opening capture device for SYN scan: %w (SYN scan needs root/CAP_NET_RAW; without root use: python3 tools/random_targets.py | ./certscout service ...)", err)
 	}
 	defer handle.Close()
 	// Define our BPFFilter to listen for ACK/SYN
@@ -145,12 +149,12 @@ func (cmd *RandomCommand) RunContext(ctx context.Context) error {
 			}
 			consecutiveFailures = 0
 		}
-		select {
-		case err := <-errCh:
-			return err
-		default:
-		}
-		return nil
+		// Wait for SYN/ACK replies before exiting. Previously this
+		// returned immediately after sending, so the listener
+		// goroutine was killed before any reply could arrive and
+		// --count scans always produced zero results.
+		log.Printf("Waiting %ds for SYN/ACK replies...", cmd.WaitAfterSeconds)
+		return waitForReplies(ctx, errCh, time.Duration(cmd.WaitAfterSeconds)*time.Second)
 	}
 
 	consecutiveFailures := 0
@@ -173,6 +177,33 @@ func (cmd *RandomCommand) RunContext(ctx context.Context) error {
 			continue
 		}
 		consecutiveFailures = 0
+	}
+}
+
+// waitForReplies blocks until the grace period elapses, ctx is cancelled,
+// or the listener reports an error. A zero grace period checks errCh once
+// without waiting, preserving the old fast-exit behaviour for callers that
+// explicitly opt out with --wait-after 0.
+func waitForReplies(ctx context.Context, errCh <-chan error, wait time.Duration) error {
+	if wait <= 0 {
+		select {
+		case err := <-errCh:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
