@@ -209,6 +209,9 @@ from that endpoint, not proof that the name resolves there or belongs to it.
 | `--http-banner` | off | Best-effort Server/title fetch on ports 443/8443; never fails the certificate event |
 | `--expiry-within-days` | 0 (off) | Drop certificate events expiring later than N days; error events pass through |
 | `--jarm` | off | 10-probe JARM fingerprint on direct-TLS endpoints; best-effort, empty when any probe fails |
+| `--no-live-stats` | off | Disable live animated stats on stderr |
+
+When stderr is a terminal, the collector rewrites one colorized live line on stderr every 500ms (spinner, elapsed, in/accepted, TCP, certs, errors, rate). Stdout stays pure NDJSON for piping; `NO_COLOR` disables colors and `--no-live-stats` disables the line entirely. Piped stderr shows only the final JSON summary.
 
 `ip4scout random` flags:
 

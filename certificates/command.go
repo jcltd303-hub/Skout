@@ -17,6 +17,14 @@ type Command Options
 func (cmd *Command) Run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Live animated stats on stderr only, when attached to a terminal.
+	// Stdout stays pure NDJSON for piping. A caller-supplied
+	// ProgressFunc (e.g. tests) wins over the built-in renderer.
+	live := false
+	if !cmd.NoLiveStats && cmd.ProgressFunc == nil && isTerminal(os.Stderr) {
+		cmd.ProgressFunc = newLiveStatsRenderer(os.Stderr, useColor())
+		live = true
+	}
 	type completion struct {
 		stats Stats
 		err   error
@@ -26,7 +34,14 @@ func (cmd *Command) Run() error {
 		stats, err := Run(ctx, os.Stdin, os.Stdout, Options(*cmd))
 		done <- completion{stats: stats, err: err}
 	}()
-	report := func(result completion) error { _ = json.NewEncoder(os.Stderr).Encode(result.stats); return result.err }
+	report := func(result completion) error {
+		if live {
+			// End the rewritten live line before the final JSON summary.
+			fmt.Fprintln(os.Stderr)
+		}
+		_ = json.NewEncoder(os.Stderr).Encode(result.stats)
+		return result.err
+	}
 	select {
 	case result := <-done:
 		return report(result)
@@ -40,6 +55,9 @@ func (cmd *Command) Run() error {
 		case result := <-done:
 			return report(result)
 		case <-timer.C:
+			if live {
+				fmt.Fprintln(os.Stderr)
+			}
 			return fmt.Errorf("cancelled: output did not drain within 2s: %w", ctx.Err())
 		}
 	}
@@ -68,6 +86,7 @@ func Main(args []string) int {
 	fs.BoolVar(&cmd.HTTPBanner, "http-banner", cmd.HTTPBanner, "Fetch an HTTP banner (Server + title) on ports 443/8443")
 	fs.IntVar(&cmd.ExpiryWithinDays, "expiry-within-days", cmd.ExpiryWithinDays, "Only keep certificates expiring within N days; 0 disables the filter")
 	fs.BoolVar(&cmd.JARM, "jarm", cmd.JARM, "Compute the 10-probe JARM fingerprint for direct TLS endpoints")
+	fs.BoolVar(&cmd.NoLiveStats, "no-live-stats", cmd.NoLiveStats, "Disable live animated stats on stderr")
 	if len(args) > 0 && args[0] == "service" {
 		args = args[1:]
 	}

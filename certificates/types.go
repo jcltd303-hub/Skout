@@ -116,6 +116,9 @@ type Options struct {
 	HTTPBanner       bool          `help:"Fetch an HTTP banner (Server + title) on ports 443/8443"`
 	ExpiryWithinDays int           `help:"Only keep certificates expiring within N days; 0 disables the filter"`
 	JARM             bool          `help:"Compute the 10-probe JARM fingerprint for direct TLS endpoints"`
+	NoLiveStats      bool          `help:"Disable live animated stats on stderr" name:"no-live-stats"`
+	ProgressFunc     func(Stats)   `kong:"-"`
+	ProgressInterval time.Duration `kong:"-"`
 	limiter          *startLimiter
 	seen             *seenCache
 }

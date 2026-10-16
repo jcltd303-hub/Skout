@@ -119,6 +119,35 @@ func Run(parent context.Context, input io.Reader, output io.Writer, o Options) (
 	}
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	// Live progress: ticker snapshots stats under a mutex so the
+	// callback never races the results loop. Disabled when
+	// ProgressFunc is nil; the CLI sets it only on a TTY.
+	var statsMu sync.Mutex
+	if o.ProgressFunc != nil {
+		interval := o.ProgressInterval
+		if interval <= 0 {
+			interval = 500 * time.Millisecond
+		}
+		progressDone := make(chan struct{})
+		defer close(progressDone)
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-progressDone:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					statsMu.Lock()
+					snap := snapshotStats(stats)
+					statsMu.Unlock()
+					o.ProgressFunc(snap)
+				}
+			}
+		}()
+	}
 	if closer, ok := input.(io.Closer); ok {
 		stop := context.AfterFunc(ctx, func() { _ = closer.Close() })
 		defer stop()
@@ -158,6 +187,11 @@ func Run(parent context.Context, input io.Reader, output io.Writer, o Options) (
 				continue
 			}
 			report.input++
+			// Publish input progress live so the stats ticker shows
+			// real counts, not zeros until the end.
+			statsMu.Lock()
+			stats.Input = report.input
+			statsMu.Unlock()
 			target, err := ParseTarget(scanner.Bytes())
 			if err != nil {
 				event := Event{EventType: "input_error", EventSource: "ip4scout/certs", Time: time.Now().UTC(), Error: err.Error(), ErrorKind: "input", InputLine: report.input}
@@ -170,11 +204,17 @@ func Run(parent context.Context, input io.Reader, output io.Writer, o Options) (
 			}
 			if o.seen.Seen(targetKey(target, o), time.Now()) {
 				report.duplicates++
+				statsMu.Lock()
+				stats.Duplicates = report.duplicates
+				statsMu.Unlock()
 				continue
 			}
 			select {
 			case jobs <- target:
 				report.accepted++
+				statsMu.Lock()
+				stats.Accepted = report.accepted
+				statsMu.Unlock()
 			case <-ctx.Done():
 				return
 			}
@@ -193,8 +233,10 @@ func Run(parent context.Context, input io.Reader, output io.Writer, o Options) (
 				cancel()
 			}
 		}
+		statsMu.Lock()
 		if event.EventType == "input_error" {
 			stats.InputErrors++
+			statsMu.Unlock()
 			continue
 		}
 		port := stats.Ports[event.Port]
@@ -215,12 +257,15 @@ func Run(parent context.Context, input io.Reader, output io.Writer, o Options) (
 			stats.Errors++
 			port.Errors++
 		}
+		statsMu.Unlock()
 	}
 	// Producer sends its report before closing jobs, so it is available here.
 	report := <-readDone
+	statsMu.Lock()
 	stats.Input = report.input
 	stats.Accepted = report.accepted
 	stats.Duplicates = report.duplicates
+	statsMu.Unlock()
 	if writeErr != nil {
 		return stats, writeErr
 	}
