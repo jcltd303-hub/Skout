@@ -9,13 +9,13 @@ require (
 	github.com/google/gopacket v1.1.19
 	github.com/mostlygeek/arp v0.0.0-20170424181311-541a2129847a
 	go.uber.org/ratelimit v0.3.1
-	golang.org/x/net v0.61.0
+	golang.org/x/net v0.63.0
 )
 
 require (
 	github.com/PuerkitoBio/goquery v1.13.0 // indirect
 	github.com/andybalholm/cascadia v1.3.5 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
-	golang.org/x/sys v0.49.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 )
